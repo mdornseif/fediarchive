@@ -11,31 +11,34 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config holds application configuration
 type Config struct {
 	Fediverse struct {
-		InstanceURL string `json:"instance_url"`
-		Username    string `json:"username"`
-		Password    string `json:"password"`
-		Token       string `json:"token"`
-		TokenExp    string `json:"token_exp"`
-	} `json:"fediverse"`
+		InstanceURL string `json:"instance_url" yaml:"instance_url"`
+		Username    string `json:"username" yaml:"username"`
+		Password    string `json:"password" yaml:"password"`
+		Token       string `json:"token" yaml:"token"`
+		TokenExp    string `json:"token_exp" yaml:"token_exp"`
+	} `json:"fediverse" yaml:"fediverse"`
 	ArchiveBox struct {
-		URL      string `json:"url"`
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Tag      string `json:"tag"`
-	} `json:"archivebox"`
+		URL      string `json:"url" yaml:"url"`
+		Username string `json:"username" yaml:"username"`
+		Password string `json:"password" yaml:"password"`
+		Tag      string `json:"tag" yaml:"tag"`
+	} `json:"archivebox" yaml:"archivebox"`
 	Settings struct {
-		MaxPostsPerUser   int      `json:"max_posts_per_user"`
-		IncludeVisibility []string `json:"include_visibility"`
-	} `json:"settings"`
+		MaxPostsPerUser   int      `json:"max_posts_per_user" yaml:"max_posts_per_user"`
+		IncludeVisibility []string `json:"include_visibility" yaml:"include_visibility"`
+	} `json:"settings" yaml:"settings"`
 }
 
 // GoToSocial API types
@@ -303,16 +306,33 @@ func (c *FediverseClient) getNewToken() error {
 }
 
 func (c *FediverseClient) saveConfig() error {
+	// Determine config file name and format
+	configFilename := "config.json"
+	if _, err := os.Stat("config.yaml"); err == nil {
+		configFilename = "config.yaml"
+	} else if _, err := os.Stat("config.yml"); err == nil {
+		configFilename = "config.yml"
+	}
+
 	// Read existing config to preserve user settings
-	configFile, err := os.Open("config.json")
+	configFile, err := os.Open(configFilename)
 	if err != nil {
 		return fmt.Errorf("failed to open config file: %w", err)
 	}
 	defer configFile.Close()
 
 	var existingConfig Config
-	if err := json.NewDecoder(configFile).Decode(&existingConfig); err != nil {
-		return fmt.Errorf("failed to decode existing config: %w", err)
+	ext := strings.ToLower(filepath.Ext(configFilename))
+
+	switch ext {
+	case ".yaml", ".yml":
+		if err := yaml.NewDecoder(configFile).Decode(&existingConfig); err != nil {
+			return fmt.Errorf("failed to decode existing YAML config: %w", err)
+		}
+	default:
+		if err := json.NewDecoder(configFile).Decode(&existingConfig); err != nil {
+			return fmt.Errorf("failed to decode existing JSON config: %w", err)
+		}
 	}
 
 	// Only update the token fields, preserve everything else
@@ -321,15 +341,22 @@ func (c *FediverseClient) saveConfig() error {
 
 	// Write back the updated config
 	configFile.Close() // Close before reopening for writing
-	configFile, err = os.Create("config.json")
+	configFile, err = os.Create(configFilename)
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
 	defer configFile.Close()
 
-	encoder := json.NewEncoder(configFile)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(existingConfig)
+	switch ext {
+	case ".yaml", ".yml":
+		encoder := yaml.NewEncoder(configFile)
+		defer encoder.Close()
+		return encoder.Encode(existingConfig)
+	default:
+		encoder := json.NewEncoder(configFile)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(existingConfig)
+	}
 }
 
 func (c *FediverseClient) getFollowers() ([]Account, error) {
@@ -822,6 +849,53 @@ func isMediaAttachment(urlStr string) bool {
 	}
 
 	return false
+}
+
+// loadConfig loads configuration from either JSON or YAML file
+func loadConfig(filename string) (*Config, error) {
+	// Check if file exists
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		return nil, fmt.Errorf("config file %s does not exist", filename)
+	}
+
+	// Read the file
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %v", filename, err)
+	}
+
+	var config Config
+
+	// Try to determine file type by extension
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".yaml", ".yml":
+		// Parse as YAML
+		if err := yaml.Unmarshal(data, &config); err != nil {
+			return nil, fmt.Errorf("failed to parse YAML config file %s: %v", filename, err)
+		}
+		log.Printf("Loaded configuration from YAML file: %s", filename)
+	case ".json":
+		// Parse as JSON
+		if err := json.Unmarshal(data, &config); err != nil {
+			return nil, fmt.Errorf("failed to parse JSON config file %s: %v", filename, err)
+		}
+		log.Printf("Loaded configuration from JSON file: %s", filename)
+	default:
+		// Try to auto-detect format
+		// First try JSON
+		if err := json.Unmarshal(data, &config); err == nil {
+			log.Printf("Auto-detected and loaded configuration from JSON file: %s", filename)
+		} else {
+			// Try YAML
+			if err := yaml.Unmarshal(data, &config); err != nil {
+				return nil, fmt.Errorf("failed to parse config file %s as JSON or YAML: %v", filename, err)
+			}
+			log.Printf("Auto-detected and loaded configuration from YAML file: %s", filename)
+		}
+	}
+
+	return &config, nil
 }
 
 type ArchiveBoxClient struct {
@@ -1333,7 +1407,7 @@ func (c *ArchiveBoxClient) archiveURL(urlStr string, username string) error {
 	// Combine base tag with username tag if provided
 	tag := c.config.ArchiveBox.Tag
 	if username != "" {
-		tag = fmt.Sprintf("%s,fediarchive:%s", tag, username)
+		tag = fmt.Sprintf("%s,fediarchive-%s", tag, username)
 	}
 	addData.Set("tag", tag)
 	log.Printf("Archiving URL with tags: %s", tag)
@@ -1418,20 +1492,26 @@ func main() {
 	flag.Parse()
 
 	// Load configuration
-	configFile, err := os.Open("config.json")
-	if err != nil {
-		log.Fatalf("Failed to open config.json: %v", err)
-	}
-	defer configFile.Close()
+	var config *Config
+	var err error
 
-	var config Config
-	if err := json.NewDecoder(configFile).Decode(&config); err != nil {
-		log.Fatalf("Failed to parse config.json: %v", err)
+	// Try to load config in order: config.yaml, config.yml, config.json
+	configFiles := []string{"config.yaml", "config.yml", "config.json"}
+	for _, filename := range configFiles {
+		config, err = loadConfig(filename)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to load %s: %v", filename, err)
+	}
+
+	if config == nil {
+		log.Fatalf("Failed to load any configuration file. Tried: %v", configFiles)
 	}
 
 	// Initialize clients
-	fediverseClient := NewFediverseClient(&config)
-	archiveClient := NewArchiveBoxClient(&config)
+	fediverseClient := NewFediverseClient(config)
+	archiveClient := NewArchiveBoxClient(config)
 
 	// Extract instance hostname for internal link filtering
 	instanceURL, err := url.Parse(config.Fediverse.InstanceURL)

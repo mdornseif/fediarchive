@@ -25,4 +25,4 @@ archive-mastodon
 Thumbs.db
 
 # Logs
-*.log 
+*.log ./cookies.txt

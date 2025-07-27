@@ -20,6 +20,10 @@ Automatically follows back Fediverse users, extracts URLs from posts, and archiv
 
 ## Configuration
 
+The application supports both JSON and YAML configuration formats. It will automatically detect and load the first available file in this order: `config.yaml`, `config.yml`, `config.json`.
+
+### JSON Configuration
+
 ```bash
 sudo nano /opt/archive-mastodon/config.json
 ```
@@ -40,10 +44,38 @@ sudo nano /opt/archive-mastodon/config.json
     "tag": "fediarchive"
   },
   "settings": {
-    "max_posts_per_user": 1000,
+    "max_posts_per_user": 5000,
     "include_visibility": ["public", "unlisted", "private"]
   }
 }
+```
+
+### YAML Configuration
+
+```bash
+sudo nano /opt/archive-mastodon/config.yaml
+```
+
+```yaml
+fediverse:
+  instance_url: "https://your-instance.com"
+  username: "your-username"
+  password: "your-password"
+  token: ""
+  token_exp: ""
+
+archivebox:
+  url: "http://localhost:8000"
+  username: ""
+  password: ""
+  tag: "fediarchive"
+
+settings:
+  max_posts_per_user: 5000
+  include_visibility:
+    - "public"
+    - "unlisted"
+    - "private"
 ```
 
 ### Configuration Options
