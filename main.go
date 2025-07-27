@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
+	"github.com/mmcdole/gofeed"
 	"gopkg.in/yaml.v3"
 )
 
@@ -39,6 +41,7 @@ type Config struct {
 		MaxPostsPerUser    int      `json:"max_posts_per_user" yaml:"max_posts_per_user"`
 		IncludeVisibility  []string `json:"include_visibility" yaml:"include_visibility"`
 		BlacklistedDomains []string `json:"blacklisted_domains" yaml:"blacklisted_domains"`
+		RSSFeeds           []string `json:"rss_feeds" yaml:"rss_feeds"`
 	} `json:"settings" yaml:"settings"`
 }
 
@@ -672,6 +675,100 @@ func extractURLsFromStatus(status Status, instanceHostname string, fediverseHost
 	}
 
 	return uniqueURLs
+}
+
+func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
+	if len(config.Settings.RSSFeeds) == 0 {
+		log.Println("No RSS feeds configured, skipping RSS processing")
+		return
+	}
+
+	log.Printf("Processing %d RSS feeds...", len(config.Settings.RSSFeeds))
+
+	fp := gofeed.NewParser()
+
+	for _, feedURL := range config.Settings.RSSFeeds {
+		log.Printf("Processing RSS feed: %s", feedURL)
+
+		// Check if the URL is a direct link to an RSS feed or a page to discover the feed from
+		if !strings.HasSuffix(feedURL, ".xml") {
+			log.Printf("URL does not end in .xml, attempting to discover RSS feed from page...")
+			discoveredURL, err := discoverRSSFeed(feedURL)
+			if err != nil {
+				log.Printf("Error discovering RSS feed from %s: %v", feedURL, err)
+				continue
+			}
+			log.Printf("Discovered RSS feed: %s", discoveredURL)
+			feedURL = discoveredURL
+		}
+
+		// Extract hostname from the RSS feed URL to filter out internal links
+		feedURLParsed, err := url.Parse(feedURL)
+		if err != nil {
+			log.Printf("Error parsing RSS feed URL %s: %v", feedURL, err)
+			continue
+		}
+		feedHostname := feedURLParsed.Hostname()
+		log.Printf("RSS feed hostname: %s", feedHostname)
+
+		parsedFeed, err := fp.ParseURL(feedURL)
+		if err != nil {
+			log.Printf("Error parsing RSS feed %s: %v", feedURL, err)
+			continue
+		}
+
+		log.Printf("Found %d items in RSS feed %s", len(parsedFeed.Items), feedURL)
+
+		urlsToArchive := make(map[string]bool)
+
+		for _, item := range parsedFeed.Items {
+			// Extract URLs from the item link
+			if item.Link != "" {
+				// Check if the link is on the same hostname as the RSS feed
+				itemURL, err := url.Parse(item.Link)
+				if err == nil && itemURL.Hostname() != feedHostname {
+					urlsToArchive[item.Link] = true
+				} else {
+					log.Printf("Skipping internal link from RSS feed: %s", item.Link)
+				}
+			}
+
+			// Extract URLs from the item description/content
+			if item.Description != "" {
+				urls := extractURLs(item.Description, "", make(map[string]bool), config.Settings.BlacklistedDomains)
+				for _, urlStr := range urls {
+					// Check if the URL is on the same hostname as the RSS feed
+					urlParsed, err := url.Parse(urlStr)
+					if err == nil && urlParsed.Hostname() != feedHostname {
+						urlsToArchive[urlStr] = true
+					} else {
+						log.Printf("Skipping internal link from RSS feed: %s", urlStr)
+					}
+				}
+			}
+
+			// Check for enclosures (media links)
+			for _, enclosure := range item.Enclosures {
+				if enclosure.URL != "" && !isMediaAttachment(enclosure.URL) {
+					// Check if the enclosure URL is on the same hostname as the RSS feed
+					enclosureURL, err := url.Parse(enclosure.URL)
+					if err == nil && enclosureURL.Hostname() != feedHostname {
+						urlsToArchive[enclosure.URL] = true
+					} else {
+						log.Printf("Skipping internal enclosure from RSS feed: %s", enclosure.URL)
+					}
+				}
+			}
+		}
+
+		// Archive the unique URLs
+		for url := range urlsToArchive {
+			log.Printf("Archiving URL from RSS feed %s: %s", feedURL, url)
+			archiveClient.archiveURL(url, "") // No username for RSS feeds
+		}
+
+		log.Printf("Processed RSS feed %s: found %d unique URLs", feedURL, len(urlsToArchive))
+	}
 }
 
 // shouldProcessStatus checks if a status should be processed based on visibility settings
@@ -1561,6 +1658,51 @@ func (c *ArchiveBoxClient) testConnection() error {
 	return fmt.Errorf("ArchiveBox connection failed - status: %d", resp.StatusCode)
 }
 
+func discoverRSSFeed(pageURL string) (string, error) {
+	// Make a GET request to the page
+	res, err := http.Get(pageURL)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != 200 {
+		return "", fmt.Errorf("failed to fetch page: status code %d", res.StatusCode)
+	}
+
+	// Load the HTML document
+	doc, err := goquery.NewDocumentFromReader(res.Body)
+	if err != nil {
+		return "", err
+	}
+
+	// Find the RSS link
+	rssLink, exists := doc.Find(`a[title="RSS"]`).Attr("href")
+	if !exists {
+		// Try another common pattern
+		rssLink, exists = doc.Find(`link[type="application/rss+xml"]`).Attr("href")
+	}
+
+	if !exists {
+		return "", fmt.Errorf("could not find RSS feed link on page %s", pageURL)
+	}
+
+	// If the link is relative, make it absolute
+	if !strings.HasPrefix(rssLink, "http") {
+		baseURL, err := url.Parse(pageURL)
+		if err != nil {
+			return "", err
+		}
+		rssURL, err := baseURL.Parse(rssLink)
+		if err != nil {
+			return "", err
+		}
+		return rssURL.String(), nil
+	}
+
+	return rssLink, nil
+}
+
 func main() {
 	// Parse command line flags
 	singleRun := flag.Bool("single", false, "Run only once instead of continuously")
@@ -1827,6 +1969,9 @@ func main() {
 			// Add delay between users to avoid rate limiting
 			time.Sleep(2 * time.Second)
 		}
+
+		// Process RSS feeds
+		processRSSFeeds(config, archiveClient)
 
 		log.Println("Archive process completed")
 

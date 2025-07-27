@@ -18,3 +18,18 @@ settings:
     blacklisted_domains:
         - example.com
         - test.blacklist.com
+        - natur.23.nu
+    rss_feeds:
+        - https://natur.23.nu/feeds/c/kulturlandschaft.xml
+        - https://natur.23.nu/c/solarpunk
+        - https://natur.23.nu/c/streuobst
+        - https://natur.23.nu/c/forst
+        - https://natur.23.nu/c/bergisch
+        - https://natur.23.nu/c/bezugsquellen
+        - https://natur.23.nu/c/gartenbau
+        - https://natur.23.nu/c/bau 
+        - https://natur.23.nu/c/erleben
+        - https://natur.23.nu/c/news
+
+
+

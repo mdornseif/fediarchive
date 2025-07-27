@@ -15,6 +15,10 @@
   "settings": {
     "max_posts_per_user": 5000,
     "include_visibility": ["public", "unlisted", "private"],
-    "blacklisted_domains": ["example.com", "spam-site.com", "ads.example.org"]
+    "blacklisted_domains": ["example.com", "spam-site.com", "ads.example.org", "natur.23.nu"],
+    "rss_feeds": [
+      "https://natur.23.nu/feeds/c/kulturlandschaft.xml?sort=Active",
+      "https://example.com/feed.xml"
+    ]
   }
 } 

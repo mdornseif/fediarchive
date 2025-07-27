@@ -97,6 +97,58 @@ settings:
   - `max_posts_per_user`: Maximum posts to fetch per user
   - `include_visibility`: Which post visibilities to process
   - `blacklisted_domains`: List of domains to exclude from archiving (optional)
+  - `rss_feeds`: List of RSS feeds to monitor and archive links from (optional)
+
+## RSS Feed Monitoring
+
+The application can monitor RSS feeds from various sources (including Lemmy communities) and automatically archive all links found in the feed items. This is useful for:
+
+- Monitoring Lemmy communities for new posts with links
+- Following blog RSS feeds
+- Archiving links from news sources
+- Tracking content from any RSS-enabled platform
+
+### RSS Feed Configuration
+
+The application can monitor a list of RSS feed URLs. You can provide either:
+- Direct RSS feed URLs (ending in `.xml`)
+- Community page URLs (the application will automatically discover the RSS feed)
+
+### Example RSS Configuration
+
+```yaml
+settings:
+  rss_feeds:
+    - "https://natur.23.nu/feeds/c/kulturlandschaft.xml?sort=Active"
+    - "https://natur.23.nu/c/kulturlandschaft"
+    - "https://example.com/feed.xml"
+```
+
+### RSS Feed Discovery
+
+When you provide a community page URL (like `https://natur.23.nu/c/kulturlandschaft`), the application will:
+1. Fetch the page and look for the RSS feed link
+2. Automatically discover the correct RSS feed URL
+3. Process the feed and archive external links
+
+### Internal Link Filtering
+
+The application automatically filters out internal links from RSS feeds to avoid archiving:
+- Lemmy post links (e.g., `https://natur.23.nu/post/12345`)
+- Links to the same hostname as the RSS feed source
+- Only external content URLs are archived
+
+### Lemmy Community RSS Feeds
+
+Most Lemmy communities provide RSS feeds at URLs like:
+- `https://instance.com/feeds/c/community.xml?sort=Active`
+- `https://instance.com/feeds/c/community.xml?sort=New`
+- `https://instance.com/feeds/c/community.xml?sort=Top`
+
+The RSS feed will extract URLs from:
+- Post links (the main URL being shared)
+- Enclosures (media attachments)
+- Content descriptions (if they contain URLs)
 
 ## Usage
 
