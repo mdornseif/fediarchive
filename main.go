@@ -1144,6 +1144,10 @@ func (c *ArchiveBoxClient) login() error {
 		if c.sessionCookie != "" {
 			c.isLoggedIn = true
 			log.Printf("Successfully logged in to ArchiveBox using %s", endpoint)
+			// Save the session cookie to file
+			if err := saveSessionCookieToFile("cookies.txt", c.sessionCookie); err != nil {
+				log.Printf("Warning: failed to save session cookie: %v", err)
+			}
 			return nil
 		}
 		// If login was successful, we should get a redirect
@@ -1174,6 +1178,10 @@ func (c *ArchiveBoxClient) login() error {
 						if c.sessionCookie != "" {
 							c.isLoggedIn = true
 							log.Printf("Successfully logged in to ArchiveBox using %s (after redirect)", endpoint)
+							// Save the session cookie to file
+							if err := saveSessionCookieToFile("cookies.txt", c.sessionCookie); err != nil {
+								log.Printf("Warning: failed to save session cookie: %v", err)
+							}
 							return nil
 						}
 					}
