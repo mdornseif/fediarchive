@@ -10,5 +10,9 @@
     "url": "http://localhost:8000",
     "username": "",
     "password": ""
+  },
+  "settings": {
+    "max_posts_per_user": 1000,
+    "include_visibility": ["public", "unlisted", "private"]
   }
 } 

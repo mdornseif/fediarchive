@@ -174,6 +174,15 @@ print_status "Enabling systemd service..."
 sudo systemctl daemon-reload
 sudo systemctl enable archive-mastodon.service
 
+# Check if service is already running and restart it
+if sudo systemctl is-active --quiet archive-mastodon.service; then
+    print_status "Service is currently running. Restarting it..."
+    sudo systemctl restart archive-mastodon.service
+    print_success "Service restarted successfully"
+else
+    print_status "Service is not currently running"
+fi
+
 print_success "Service enabled successfully"
 
 # Create log directory
@@ -194,7 +203,7 @@ echo "Next steps:"
 echo "1. Configure the application:"
 echo "   sudo nano $INSTALL_DIR/config.json"
 echo
-echo "2. Start the service:"
+echo "2. Start the service (if not already running):"
 echo "   sudo systemctl start archive-mastodon"
 echo
 echo "3. Check the service status:"
@@ -204,4 +213,5 @@ echo "4. View logs:"
 echo "   sudo journalctl -u archive-mastodon -f"
 echo
 
-print_warning "Remember to configure your Fediverse instance URL and credentials before starting the service!" 
+print_warning "Remember to configure your Fediverse instance URL and credentials before starting the service!"
+print_success "Note: If the service was already running, it has been automatically restarted with the new version." 

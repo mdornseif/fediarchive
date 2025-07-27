@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +29,10 @@ type Config struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	} `json:"archivebox"`
+	Settings struct {
+		MaxPostsPerUser int      `json:"max_posts_per_user"`
+		IncludeVisibility []string `json:"include_visibility"`
+	} `json:"settings"`
 }
 
 // GoToSocial API types
@@ -429,17 +434,98 @@ func (c *FediverseClient) getHomeTimeline() ([]Status, error) {
 	return statuses, nil
 }
 
-func extractURLs(content string) []string {
+func (c *FediverseClient) getUserStatuses(accountID string, limit int) ([]Status, error) {
+	// Get user's status history
+	url := fmt.Sprintf("%s/api/v1/accounts/%s/statuses?limit=%d", c.config.Fediverse.InstanceURL, accountID, limit)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user statuses request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user statuses: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var statuses []Status
+	if err := json.NewDecoder(resp.Body).Decode(&statuses); err != nil {
+		return nil, fmt.Errorf("failed to decode user statuses response: %w", err)
+	}
+	return statuses, nil
+}
+
+func (c *FediverseClient) getAllUserStatuses(accountID string, maxPosts int) ([]Status, error) {
+	// Get all user's statuses using pagination
+	var allStatuses []Status
+	var maxID string
+	postsPerPage := 80 // Maximum allowed by most Fediverse instances
+	totalPosts := 0
+
+	for {
+		// Build URL with pagination
+		url := fmt.Sprintf("%s/api/v1/accounts/%s/statuses?limit=%d", c.config.Fediverse.InstanceURL, accountID, postsPerPage)
+		if maxID != "" {
+			url += fmt.Sprintf("&max_id=%s", maxID)
+		}
+
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create user statuses request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+c.accessToken)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get user statuses: %w", err)
+		}
+		defer resp.Body.Close()
+
+		var statuses []Status
+		if err := json.NewDecoder(resp.Body).Decode(&statuses); err != nil {
+			return nil, fmt.Errorf("failed to decode user statuses response: %w", err)
+		}
+
+		// If no more statuses, break
+		if len(statuses) == 0 {
+			break
+		}
+
+		// Add statuses to our collection
+		allStatuses = append(allStatuses, statuses...)
+		totalPosts += len(statuses)
+
+		log.Printf("Fetched %d posts from user %s (total: %d)", len(statuses), accountID, totalPosts)
+
+		// Check if we've reached the maximum
+		if maxPosts > 0 && totalPosts >= maxPosts {
+			allStatuses = allStatuses[:maxPosts]
+			break
+		}
+
+		// Set max_id for next page (use the ID of the last status)
+		maxID = statuses[len(statuses)-1].ID
+
+		// Add a small delay to avoid rate limiting
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	log.Printf("Total posts fetched from user %s: %d", accountID, len(allStatuses))
+	return allStatuses, nil
+}
+
+func extractURLs(content string, instanceHostname string, fediverseHostnames map[string]bool) []string {
 	urlRegex := regexp.MustCompile(`https?://[^\s<>"{}|\\^`+"`"+`\[\]]+`)
 	matches := urlRegex.FindAllString(content, -1)
 	
-	var urls []string
+	urls := make([]string, 0)
 	for _, match := range matches {
 		// Clean up the URL (remove trailing punctuation)
 		cleanURL := strings.TrimRight(match, ".,;:!?")
 		
 		// Skip internal Fediverse links
-		if isInternalFediverseLink(cleanURL) {
+		if isInternalFediverseLink(cleanURL, instanceHostname, fediverseHostnames) {
 			log.Printf("Skipping internal Fediverse link: %s", cleanURL)
 			continue
 		}
@@ -450,131 +536,238 @@ func extractURLs(content string) []string {
 	return urls
 }
 
-func isInternalFediverseLink(urlStr string) bool {
-	// Common Fediverse domains to skip
-	fediverseDomains := []string{
-		"mstdn.social",
-		"mastodon.social", 
-		"mastodon.online",
-		"mastodon.world",
-		"mastodon.xyz",
-		"mastodon.cloud",
-		"mastodon.art",
-		"mastodon.technology",
-		"mastodon.green",
-		"mastodon.lol",
-		"mastodon.nu",
-		"mastodon.org",
-		"mastodon.com",
-		"mastodon.net",
-		"mastodon.co",
-		"mastodon.io",
-		"mastodon.me",
-		"mastodon.space",
-		"mastodon.work",
-		"mastodon.cafe",
-		"mastodon.zone",
-		"mastodon.uno",
-		"mastodon.one",
-		"mastodon.town",
-		"mastodon.city",
-		"mastodon.country",
-		"mastodon.state",
-		"mastodon.land",
-		"mastodon.earth",
-		"mastodon.moon",
-		"mastodon.sun",
-		"mastodon.star",
-		"mastodon.galaxy",
-		"mastodon.universe",
-		"mastodon.cosmos",
-		"mastodon.void",
-		"mastodon.null",
-		"mastodon.zero",
-		"mastodon.one",
-		"mastodon.two",
-		"mastodon.three",
-		"mastodon.four",
-		"mastodon.five",
-		"mastodon.six",
-		"mastodon.seven",
-		"mastodon.eight",
-		"mastodon.nine",
-		"mastodon.ten",
-	}
+// extractURLsFromStatus extracts all URLs from a status, including boosts
+func extractURLsFromStatus(status Status, instanceHostname string, fediverseHostnames map[string]bool) []string {
+	var urls []string
 	
-	// Parse the URL
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		return false
-	}
+	// Log visibility for debugging
+	log.Printf("Processing status %s (visibility: %s)", status.ID, status.Visibility)
 	
-	// Check if it's a Fediverse domain
-	for _, domain := range fediverseDomains {
-		if strings.HasSuffix(parsedURL.Host, domain) {
-			// Check for internal Fediverse paths
-			path := parsedURL.Path
-			if strings.HasPrefix(path, "/tags/") ||
-			   strings.HasPrefix(path, "/@") ||
-			   strings.HasPrefix(path, "/users/") ||
-			   strings.HasPrefix(path, "/accounts/") ||
-			   strings.HasPrefix(path, "/web/") ||
-			   strings.HasPrefix(path, "/api/") ||
-			   strings.HasPrefix(path, "/oauth/") ||
-			   strings.HasPrefix(path, "/admin/") ||
-			   strings.HasPrefix(path, "/settings/") ||
-			   strings.HasPrefix(path, "/filters/") ||
-			   strings.HasPrefix(path, "/blocks/") ||
-			   strings.HasPrefix(path, "/mutes/") ||
-			   strings.HasPrefix(path, "/follow_requests/") ||
-			   strings.HasPrefix(path, "/lists/") ||
-			   strings.HasPrefix(path, "/circles/") ||
-			   strings.HasPrefix(path, "/conversations/") ||
-			   strings.HasPrefix(path, "/notifications/") ||
-			   strings.HasPrefix(path, "/favourites/") ||
-			   strings.HasPrefix(path, "/bookmarks/") ||
-			   strings.HasPrefix(path, "/pinned/") ||
-			   strings.HasPrefix(path, "/statuses/") ||
-			   strings.HasPrefix(path, "/media/") ||
-			   strings.HasPrefix(path, "/search") ||
-			   strings.HasPrefix(path, "/explore") ||
-			   strings.HasPrefix(path, "/public") ||
-			   strings.HasPrefix(path, "/local") ||
-			   strings.HasPrefix(path, "/federated") ||
-			   strings.HasPrefix(path, "/home") ||
-			   strings.HasPrefix(path, "/direct") ||
-			   strings.HasPrefix(path, "/mentions") ||
-			   strings.HasPrefix(path, "/reports") ||
-			   strings.HasPrefix(path, "/appeals") ||
-			   strings.HasPrefix(path, "/domain_blocks") ||
-			   strings.HasPrefix(path, "/email_domain_blocks") ||
-			   strings.HasPrefix(path, "/ip_blocks") ||
-			   strings.HasPrefix(path, "/retention") ||
-			   strings.HasPrefix(path, "/instances") ||
-			   strings.HasPrefix(path, "/peers") ||
-			   strings.HasPrefix(path, "/announcements") ||
-			   strings.HasPrefix(path, "/custom_emojis") ||
-			   strings.HasPrefix(path, "/trends") ||
-			   strings.HasPrefix(path, "/suggestions") ||
-			   strings.HasPrefix(path, "/endorsements") ||
-			   strings.HasPrefix(path, "/featured_tags") ||
-			   strings.HasPrefix(path, "/preferences") ||
-			   strings.HasPrefix(path, "/push_subscriptions") ||
-			   strings.HasPrefix(path, "/apps") ||
-			   strings.HasPrefix(path, "/instance") ||
-			   strings.HasPrefix(path, "/nodeinfo") ||
-			   strings.HasPrefix(path, "/.well-known/") {
-				return true
+	// Extract URLs from main status content
+	contentURLs := extractURLs(status.Content, instanceHostname, fediverseHostnames)
+	urls = append(urls, contentURLs...)
+	
+	// Handle boosts (reblogs) - extract URLs from the boosted content
+	if status.Reblogged != nil {
+		switch reblogged := status.Reblogged.(type) {
+		case bool:
+			if reblogged {
+				log.Printf("Status %s is a reblog (boolean flag)", status.ID)
 			}
+		case map[string]interface{}:
+			// This is a boosted status object
+			log.Printf("Status %s contains a boost", status.ID)
+			if content, ok := reblogged["content"].(string); ok {
+				reblogURLs := extractURLs(content, instanceHostname, fediverseHostnames)
+				urls = append(urls, reblogURLs...)
+				log.Printf("Extracted %d URLs from boosted content", len(reblogURLs))
+			}
+			
+			// Also check media attachments in the boosted status
+			if mediaAttachments, ok := reblogged["media_attachments"].([]interface{}); ok {
+				for _, media := range mediaAttachments {
+					if mediaMap, ok := media.(map[string]interface{}); ok {
+						if url, ok := mediaMap["url"].(string); ok && url != "" {
+							urls = append(urls, url)
+						}
+						if remoteURL, ok := mediaMap["remote_url"].(string); ok && remoteURL != "" {
+							urls = append(urls, remoteURL)
+						}
+					}
+				}
+			}
+			
+			// Check card in the boosted status
+			if card, ok := reblogged["card"].(map[string]interface{}); ok {
+				if cardURL, ok := card["url"].(string); ok && cardURL != "" {
+					urls = append(urls, cardURL)
+				}
+			}
+		}
+	}
+	
+	// Extract URLs from media attachments
+	for _, media := range status.MediaAttachments {
+		if media.URL != "" {
+			urls = append(urls, media.URL)
+		}
+		if media.RemoteURL != "" {
+			urls = append(urls, media.RemoteURL)
+		}
+	}
+	
+	// Extract URLs from card
+	if status.Card != nil && status.Card.URL != "" {
+		urls = append(urls, status.Card.URL)
+	}
+	
+	// Remove duplicates while preserving order
+	seen := make(map[string]bool)
+	var uniqueURLs []string
+	for _, url := range urls {
+		if !seen[url] {
+			seen[url] = true
+			uniqueURLs = append(uniqueURLs, url)
+		}
+	}
+	
+	return uniqueURLs
+}
+
+// shouldProcessStatus checks if a status should be processed based on visibility settings
+func shouldProcessStatus(status Status, includeVisibility []string) bool {
+	// If no visibility filter is set, process all statuses
+	if len(includeVisibility) == 0 {
+		return true
+	}
+	
+	// Check if the status visibility is in the allowed list
+	for _, allowedVisibility := range includeVisibility {
+		if status.Visibility == allowedVisibility {
+			return true
 		}
 	}
 	
 	return false
 }
 
+// extractHostnamesFromStatuses extracts all hostnames from a list of statuses
+func extractHostnamesFromStatuses(statuses []Status) map[string]bool {
+	hostnames := make(map[string]bool)
+	
+	for _, status := range statuses {
+		// Extract hostname from the status author's URL
+		if status.Account.URL != "" {
+			if parsedURL, err := url.Parse(status.Account.URL); err == nil {
+				hostnames[strings.ToLower(parsedURL.Host)] = true
+			}
+		}
+		
+		// Extract hostname from the status URI
+		if status.URI != "" {
+			if parsedURL, err := url.Parse(status.URI); err == nil {
+				hostnames[strings.ToLower(parsedURL.Host)] = true
+			}
+		}
+		
+		// Extract hostname from the status URL
+		if status.URL != "" {
+			if parsedURL, err := url.Parse(status.URL); err == nil {
+				hostnames[strings.ToLower(parsedURL.Host)] = true
+			}
+		}
+		
+		// Check reblogged content
+		if status.Reblogged != nil {
+			switch reblogged := status.Reblogged.(type) {
+			case map[string]interface{}:
+				// Extract hostname from reblogged account URL
+				if account, ok := reblogged["account"].(map[string]interface{}); ok {
+					if accountURL, ok := account["url"].(string); ok && accountURL != "" {
+						if parsedURL, err := url.Parse(accountURL); err == nil {
+							hostnames[strings.ToLower(parsedURL.Host)] = true
+						}
+					}
+				}
+				// Extract hostname from reblogged URI
+				if rebloggedURI, ok := reblogged["uri"].(string); ok && rebloggedURI != "" {
+					if parsedURL, err := url.Parse(rebloggedURI); err == nil {
+						hostnames[strings.ToLower(parsedURL.Host)] = true
+					}
+				}
+			}
+		}
+	}
+	
+	return hostnames
+}
+
+// getKeys returns a slice of keys from a map[string]bool
+func getKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func isInternalFediverseLink(urlStr string, instanceHostname string, fediverseHostnames map[string]bool) bool {
+	// Parse the URL
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+
+	host := strings.ToLower(parsedURL.Host)
+	path := parsedURL.Path
+
+	// Check if the URL is from the same hostname as the user's Fediverse instance
+	if instanceHostname != "" && strings.ToLower(instanceHostname) == host {
+		log.Printf("Skipping internal link from same instance: %s", urlStr)
+		return true
+	}
+
+	// Check if the URL is from any of the Fediverse hostnames we've discovered
+	if fediverseHostnames[host] {
+		log.Printf("Skipping internal link from discovered Fediverse hostname: %s", urlStr)
+		return true
+	}
+
+	// Check for common Fediverse keywords in hostname (fallback for new instances)
+	fediverseKeywords := []string{"social", "mastodon", "pleroma", "misskey", "pixelfed", "lemmy", "kbin", "peertube", "writeas", "bookwyrm", "funkwhale", "mobilizon", "hubzilla", "friendica", "diaspora", "gnusocial", "fedi", "fediverse"}
+	for _, keyword := range fediverseKeywords {
+		if strings.Contains(host, keyword) {
+			// Check for internal Fediverse paths
+			internalPaths := []string{
+				"/tags/", "/@", "/users/", "/accounts/", "/web/", "/api/",
+				"/oauth/", "/admin/", "/settings/", "/filters/", "/blocks/",
+				"/mutes/", "/follow_requests/", "/lists/", "/circles/",
+				"/conversations/", "/notifications/", "/favourites/",
+				"/bookmarks/", "/pinned/", "/statuses/", "/media/",
+				"/search", "/explore", "/public", "/local", "/federated",
+				"/home", "/direct", "/mentions", "/reports", "/appeals",
+				"/domain_blocks", "/email_domain_blocks", "/ip_blocks",
+				"/retention", "/instances", "/peers", "/announcements",
+				"/custom_emojis", "/trends", "/suggestions", "/endorsements",
+				"/featured_tags", "/preferences", "/push_subscriptions",
+				"/apps", "/instance", "/nodeinfo", "/.well-known/",
+				"/u/", "/c/", "/post/", "/comment/", "/community/",
+				"/modlog", "/admin", "/settings", "/inbox", "/outbox",
+				"/followers", "/following", "/featured", "/pinned",
+				"/status/", "/activity", "/collections", "/liked",
+				"/shared", "/bookmarks", "/mutes", "/blocks",
+			}
+
+			for _, internalPath := range internalPaths {
+				if strings.HasPrefix(path, internalPath) {
+					return true
+				}
+			}
+
+			// Also check for user profile patterns (e.g., /@username, /u/username)
+			if strings.Contains(path, "/@") || strings.Contains(path, "/u/") {
+				return true
+			}
+
+			// Check for hashtag patterns
+			if strings.Contains(path, "/tags/") || strings.Contains(path, "/hashtag/") {
+				return true
+			}
+
+			// If it's a Fediverse domain, it's likely internal unless it's a specific external link
+			return true
+		}
+	}
+
+	return false
+}
+
 type ArchiveBoxClient struct {
 	config     *Config
 	httpClient *http.Client
+	sessionCookie string
+	csrfCookie    string
+	isLoggedIn    bool
 }
 
 func NewArchiveBoxClient(config *Config) *ArchiveBoxClient {
@@ -583,28 +776,175 @@ func NewArchiveBoxClient(config *Config) *ArchiveBoxClient {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		sessionCookie: "",
+		csrfCookie:    "",
+		isLoggedIn:    false,
 	}
 }
 
-func (c *ArchiveBoxClient) archiveURL(url string) error {
-	// ArchiveBox API endpoint for adding URLs
-	archiveData := map[string]interface{}{
-		"url": url,
-		"depth": 0,
-		"force": true,
+func (c *ArchiveBoxClient) login() error {
+	if c.isLoggedIn {
+		return nil // Already logged in
 	}
 
-	archiveJSON, _ := json.Marshal(archiveData)
-	req, err := http.NewRequest("POST", c.config.ArchiveBox.URL+"/api/add", bytes.NewBuffer(archiveJSON))
+	// First, get the login page to extract CSRF token
+	loginPageReq, err := http.NewRequest("GET", c.config.ArchiveBox.URL+"/admin/login/", nil)
+	if err != nil {
+		return fmt.Errorf("failed to create login page request: %w", err)
+	}
+
+	loginPageResp, err := c.httpClient.Do(loginPageReq)
+	if err != nil {
+		return fmt.Errorf("failed to get login page: %w", err)
+	}
+	defer loginPageResp.Body.Close()
+
+	// Extract CSRF token from the response
+	body, err := io.ReadAll(loginPageResp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read login page: %w", err)
+	}
+
+	// Find CSRF token in the HTML
+	csrfToken := ""
+	csrfPattern := regexp.MustCompile(`name="csrfmiddlewaretoken" value="([^"]+)"`)
+	matches := csrfPattern.FindStringSubmatch(string(body))
+	if len(matches) > 1 {
+		csrfToken = matches[1]
+	}
+
+	if csrfToken == "" {
+		return fmt.Errorf("failed to extract CSRF token from login page")
+	}
+
+	// Get cookies from the login page response
+	var cookies []string
+	for _, cookie := range loginPageResp.Cookies() {
+		if cookie.Name == "sessionid" {
+			c.sessionCookie = cookie.Value
+		}
+		if cookie.Name == "csrftoken" {
+			c.csrfCookie = cookie.Value
+		}
+		cookies = append(cookies, cookie.Name+"="+cookie.Value)
+	}
+
+	// Prepare login form data
+	loginData := url.Values{}
+	loginData.Set("username", c.config.ArchiveBox.Username)
+	loginData.Set("password", c.config.ArchiveBox.Password)
+	loginData.Set("csrfmiddlewaretoken", csrfToken)
+	loginData.Set("next", "/admin/")
+
+	// Submit login form
+	loginReq, err := http.NewRequest("POST", c.config.ArchiveBox.URL+"/admin/login/", strings.NewReader(loginData.Encode()))
+	if err != nil {
+		return fmt.Errorf("failed to create login request: %w", err)
+	}
+
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginReq.Header.Set("Referer", c.config.ArchiveBox.URL+"/admin/login/")
+	
+	// Add all cookies from the login page
+	if len(cookies) > 0 {
+		loginReq.Header.Set("Cookie", strings.Join(cookies, "; "))
+	}
+
+	loginResp, err := c.httpClient.Do(loginReq)
+	if err != nil {
+		return fmt.Errorf("failed to submit login: %w", err)
+	}
+	defer loginResp.Body.Close()
+
+	// Check if login was successful
+	if loginResp.StatusCode == http.StatusOK {
+		// Read response to check for login errors
+		loginBody, _ := io.ReadAll(loginResp.Body)
+		if strings.Contains(string(loginBody), "Please enter the correct username and password") {
+			return fmt.Errorf("login failed: invalid username or password")
+		}
+	}
+
+	// Get the new session cookie from the login response
+	for _, cookie := range loginResp.Cookies() {
+		if cookie.Name == "sessionid" {
+			c.sessionCookie = cookie.Value
+			break
+		}
+	}
+
+	if c.sessionCookie == "" {
+		// Check if we got redirected (which might indicate successful login)
+		if loginResp.StatusCode == http.StatusFound {
+			location := loginResp.Header.Get("Location")
+			if strings.Contains(location, "/admin/") {
+				// Try to get session cookie from a follow-up request
+				return c.verifyLogin()
+			}
+		}
+		return fmt.Errorf("failed to get session cookie after login")
+	}
+
+	c.isLoggedIn = true
+	log.Printf("Successfully logged into ArchiveBox")
+	return nil
+}
+
+func (c *ArchiveBoxClient) verifyLogin() error {
+	log.Printf("Verifying login by accessing admin page...")
+	
+	req, err := http.NewRequest("GET", c.config.ArchiveBox.URL+"/admin/", nil)
+	if err != nil {
+		return fmt.Errorf("failed to create verification request: %w", err)
+	}
+
+	// Add cookies
+	var cookies []string
+	if c.sessionCookie != "" {
+		cookies = append(cookies, "sessionid="+c.sessionCookie)
+	}
+	if c.csrfCookie != "" {
+		cookies = append(cookies, "csrftoken="+c.csrfCookie)
+	}
+	if len(cookies) > 0 {
+		req.Header.Set("Cookie", strings.Join(cookies, "; "))
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to verify login: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Get session cookie from verification response
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "sessionid" {
+			c.sessionCookie = cookie.Value
+			break
+		}
+	}
+
+	if c.sessionCookie == "" {
+		return fmt.Errorf("still no session cookie after verification")
+	}
+
+	c.isLoggedIn = true
+	log.Printf("Login verified successfully")
+	return nil
+}
+
+func (c *ArchiveBoxClient) archiveURL(urlStr string) error {
+	// Use ArchiveBox web interface at /add/
+	formData := url.Values{}
+	formData.Set("url", urlStr)
+	formData.Set("depth", "0")
+	formData.Set("force", "true")
+
+	req, err := http.NewRequest("POST", c.config.ArchiveBox.URL+"/add/", strings.NewReader(formData.Encode()))
 	if err != nil {
 		return fmt.Errorf("failed to create archive request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Add basic auth if configured
-	if c.config.ArchiveBox.Username != "" && c.config.ArchiveBox.Password != "" {
-		req.SetBasicAuth(c.config.ArchiveBox.Username, c.config.ArchiveBox.Password)
-	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -612,41 +952,74 @@ func (c *ArchiveBoxClient) archiveURL(url string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("archive request failed with status %d: %s", resp.StatusCode, string(body))
+	// Read response body for logging
+	body, _ := io.ReadAll(resp.Body)
+	
+	// Check if we got redirected to login (indicates authentication required)
+	if resp.StatusCode == http.StatusFound {
+		location := resp.Header.Get("Location")
+		if strings.Contains(location, "login") {
+			log.Printf("ArchiveBox requires authentication - redirected to: %s", location)
+			return fmt.Errorf("ArchiveBox authentication required - cannot archive URL: %s", urlStr)
+		}
+	}
+	
+	// Check if we got a login page (indicates authentication issue)
+	if strings.Contains(string(body), "Log in") || strings.Contains(string(body), "login") {
+		log.Printf("ArchiveBox returned login page - authentication required")
+		return fmt.Errorf("ArchiveBox authentication required - cannot archive URL: %s", urlStr)
 	}
 
-	log.Printf("Successfully queued URL for archiving: %s", url)
+	// Accept 200 or 201 as successful responses (but not 302 redirects)
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		log.Printf("Successfully queued URL for archiving: %s", urlStr)
+		log.Printf("ArchiveBox response status: %d", resp.StatusCode)
+		log.Printf("ArchiveBox response body length: %d bytes", len(body))
+		if len(body) > 500 {
+			log.Printf("ArchiveBox response preview (first 500 chars): %s", string(body[:500]))
+		} else {
+			log.Printf("ArchiveBox full response: %s", string(body))
+		}
+		return nil
+	}
+
+	log.Printf("Warning: Could not archive URL %s - ArchiveBox returned status: %d", urlStr, resp.StatusCode)
+	log.Printf("ArchiveBox error response body length: %d bytes", len(body))
+	if len(body) > 500 {
+		log.Printf("ArchiveBox error response preview (first 500 chars): %s", string(body[:500]))
+	} else {
+		log.Printf("ArchiveBox error response: %s", string(body))
+	}
 	return nil
 }
 
 func (c *ArchiveBoxClient) testConnection() error {
-	// Test ArchiveBox connection
-	req, err := http.NewRequest("GET", c.config.ArchiveBox.URL+"/api/", nil)
+	// Test ArchiveBox connection by trying to access the main page
+	req, err := http.NewRequest("GET", c.config.ArchiveBox.URL+"/", nil)
 	if err != nil {
 		return fmt.Errorf("failed to create test request: %w", err)
 	}
 
-	// Add basic auth if configured
-	if c.config.ArchiveBox.Username != "" && c.config.ArchiveBox.Password != "" {
-		req.SetBasicAuth(c.config.ArchiveBox.Username, c.config.ArchiveBox.Password)
-	}
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to test ArchiveBox connection: %w", err)
+		return fmt.Errorf("failed to connect to ArchiveBox: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ArchiveBox API test failed with status %d", resp.StatusCode)
+	// Accept 200 as successful response (ArchiveBox is accessible)
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("ArchiveBox connection successful (status: %d)", resp.StatusCode)
+		return nil
 	}
 
-	return nil
+	return fmt.Errorf("ArchiveBox connection failed - status: %d", resp.StatusCode)
 }
 
 func main() {
+	// Parse command line flags
+	singleRun := flag.Bool("single", false, "Run only once instead of continuously")
+	flag.Parse()
+
 	// Load configuration
 	configFile, err := os.Open("config.json")
 	if err != nil {
@@ -663,7 +1036,19 @@ func main() {
 	fediverseClient := NewFediverseClient(&config)
 	archiveClient := NewArchiveBoxClient(&config)
 
-	log.Println("Starting Archive Mastodon service...")
+	// Extract instance hostname for internal link filtering
+	instanceURL, err := url.Parse(config.Fediverse.InstanceURL)
+	if err != nil {
+		log.Fatalf("Failed to parse instance URL: %v", err)
+	}
+	instanceHostname := instanceURL.Host
+	log.Printf("Using instance hostname for filtering: %s", instanceHostname)
+
+	if *singleRun {
+		log.Println("Starting Archive Mastodon service (single run mode)...")
+	} else {
+		log.Println("Starting Archive Mastodon service (continuous mode)...")
+	}
 
 	for {
 		// Test ArchiveBox connection
@@ -733,55 +1118,40 @@ func main() {
 
 		log.Printf("Retrieved %d statuses from home timeline", len(statuses))
 
+		// Extract hostnames from all statuses to build dynamic Fediverse domain list
+		fediverseHostnames := extractHostnamesFromStatuses(statuses)
+		log.Printf("Discovered %d Fediverse hostnames: %v", len(fediverseHostnames), getKeys(fediverseHostnames))
+
 		urlsToArchive := make(map[string]bool) // Use map to avoid duplicates
+		visibilityStats := make(map[string]int)
+		processedCount := 0
+		skippedCount := 0
 
 		for _, status := range statuses {
-			// Extract URLs from status content
-			urls := extractURLs(status.Content)
+			visibilityStats[status.Visibility]++
+			
+			// Check if we should process this status based on visibility
+			if !shouldProcessStatus(status, config.Settings.IncludeVisibility) {
+				skippedCount++
+				continue
+			}
+			
+			processedCount++
+			// Extract all URLs from status (including boosts)
+			urls := extractURLsFromStatus(status, instanceHostname, fediverseHostnames)
 			for _, url := range urls {
 				urlsToArchive[url] = true
 			}
-
-					// Extract URLs from reblogged status
-		if status.Reblogged != nil {
-			switch reblogged := status.Reblogged.(type) {
-			case bool:
-				// reblogged is just a boolean flag
-				if reblogged {
-					log.Printf("Status is a reblog (boolean flag)")
-				}
-			case map[string]interface{}:
-				// reblogged is a Status object
-				if content, ok := reblogged["content"].(string); ok {
-					reblogURLs := extractURLs(content)
-					for _, url := range reblogURLs {
-						urlsToArchive[url] = true
-					}
-				}
-			}
 		}
+		
+		log.Printf("Home timeline visibility stats: %v", visibilityStats)
+		log.Printf("Processed %d statuses, skipped %d statuses", processedCount, skippedCount)
 
-			// Extract URLs from media attachments
-			for _, media := range status.MediaAttachments {
-				if media.URL != "" {
-					urlsToArchive[media.URL] = true
-				}
-				if media.RemoteURL != "" {
-					urlsToArchive[media.RemoteURL] = true
-				}
-			}
+		log.Printf("Found %d unique URLs to archive from home timeline", len(urlsToArchive))
 
-			// Extract URLs from card
-			if status.Card != nil && status.Card.URL != "" {
-				urlsToArchive[status.Card.URL] = true
-			}
-		}
-
-		log.Printf("Found %d unique URLs to archive", len(urlsToArchive))
-
-		// Archive URLs
+		// Archive URLs from home timeline
 		for url := range urlsToArchive {
-			log.Printf("Archiving URL: %s", url)
+			log.Printf("Archiving URL from home timeline: %s", url)
 			if err := archiveClient.archiveURL(url); err != nil {
 				log.Printf("Failed to archive URL %s: %v", url, err)
 			}
@@ -789,7 +1159,86 @@ func main() {
 			time.Sleep(500 * time.Millisecond)
 		}
 
+		// Process older posts from followed users
+		log.Println("Processing older posts from followed users...")
+		processedUsers := make(map[string]bool) // Track processed users to avoid duplicates
+
+		for _, follower := range followers {
+			if processedUsers[follower.ID] {
+				continue
+			}
+			processedUsers[follower.ID] = true
+
+			log.Printf("Processing older posts from user: %s (@%s)", follower.DisplayName, follower.Username)
+			
+			// Get user's statuses (up to configured limit for comprehensive coverage)
+			maxPosts := config.Settings.MaxPostsPerUser
+			if maxPosts <= 0 {
+				maxPosts = 1000 // Default to 1000 if not configured
+			}
+			userStatuses, err := fediverseClient.getAllUserStatuses(follower.ID, maxPosts)
+			if err != nil {
+				log.Printf("Failed to get statuses for user %s: %v", follower.Username, err)
+				continue
+			}
+
+			log.Printf("Retrieved %d statuses from user %s", len(userStatuses), follower.Username)
+
+			// Extract hostnames from user's statuses and merge with existing ones
+			userFediverseHostnames := extractHostnamesFromStatuses(userStatuses)
+			for hostname := range userFediverseHostnames {
+				fediverseHostnames[hostname] = true
+			}
+			log.Printf("Updated Fediverse hostnames (now %d total): %v", len(fediverseHostnames), getKeys(fediverseHostnames))
+
+			userURLsToArchive := make(map[string]bool)
+			userVisibilityStats := make(map[string]int)
+			userProcessedCount := 0
+			userSkippedCount := 0
+
+			for _, status := range userStatuses {
+				userVisibilityStats[status.Visibility]++
+				
+				// Check if we should process this status based on visibility
+				if !shouldProcessStatus(status, config.Settings.IncludeVisibility) {
+					userSkippedCount++
+					continue
+				}
+				
+				userProcessedCount++
+				// Extract all URLs from status (including boosts)
+				urls := extractURLsFromStatus(status, instanceHostname, fediverseHostnames)
+				for _, url := range urls {
+					userURLsToArchive[url] = true
+				}
+			}
+			
+			log.Printf("User %s visibility stats: %v", follower.Username, userVisibilityStats)
+			log.Printf("User %s: processed %d statuses, skipped %d statuses", follower.Username, userProcessedCount, userSkippedCount)
+
+			log.Printf("Found %d unique URLs to archive from user %s", len(userURLsToArchive), follower.Username)
+
+			// Archive URLs from user's posts
+			for url := range userURLsToArchive {
+				log.Printf("Archiving URL from user %s: %s", follower.Username, url)
+				if err := archiveClient.archiveURL(url); err != nil {
+					log.Printf("Failed to archive URL %s: %v", url, err)
+				}
+				// Add a small delay to avoid overwhelming the ArchiveBox instance
+				time.Sleep(500 * time.Millisecond)
+			}
+
+			// Add delay between users to avoid rate limiting
+			time.Sleep(2 * time.Second)
+		}
+
 		log.Println("Archive process completed")
+
+		// If single run mode, exit after one iteration
+		if *singleRun {
+			log.Println("Single run mode - exiting after completion")
+			break
+		}
 
 		// Wait before next run
 		log.Println("Waiting 30 minutes before next run...")
