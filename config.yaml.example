@@ -20,4 +20,5 @@ settings:
   blacklisted_domains:
     - "example.com"
     - "spam-site.com"
-    - "ads.example.org" 
+    - "ads.example.org"
+    - "natur.23.nu" 

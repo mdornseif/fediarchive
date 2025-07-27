@@ -18,3 +18,4 @@ settings:
     blacklisted_domains:
         - example.com
         - test.blacklist.com
+        - natur.23.nu

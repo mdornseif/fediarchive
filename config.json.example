@@ -15,6 +15,6 @@
   "settings": {
     "max_posts_per_user": 5000,
     "include_visibility": ["public", "unlisted", "private"],
-    "blacklisted_domains": ["example.com", "spam-site.com", "ads.example.org"]
+    "blacklisted_domains": ["example.com", "spam-site.com", "ads.example.org", "natur.23.nu"]
   }
 } 
