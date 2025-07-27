@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -464,8 +465,12 @@ func (c *FediverseClient) getAllUserStatuses(accountID string, maxPosts int) ([]
 	var maxID string
 	postsPerPage := 80 // Maximum allowed by most Fediverse instances
 	totalPosts := 0
+	pageCount := 0
+
+	log.Printf("Starting to fetch posts for user %s (max: %d)", accountID, maxPosts)
 
 	for {
+		pageCount++
 		// Build URL with pagination
 		url := fmt.Sprintf("%s/api/v1/accounts/%s/statuses?limit=%d", c.config.Fediverse.InstanceURL, accountID, postsPerPage)
 		if maxID != "" {
@@ -491,6 +496,7 @@ func (c *FediverseClient) getAllUserStatuses(accountID string, maxPosts int) ([]
 
 		// If no more statuses, break
 		if len(statuses) == 0 {
+			log.Printf("No more posts found for user %s (page %d)", accountID, pageCount)
 			break
 		}
 
@@ -498,10 +504,17 @@ func (c *FediverseClient) getAllUserStatuses(accountID string, maxPosts int) ([]
 		allStatuses = append(allStatuses, statuses...)
 		totalPosts += len(statuses)
 
-		log.Printf("Fetched %d posts from user %s (total: %d)", len(statuses), accountID, totalPosts)
+		// Log the date range of this page
+		if len(statuses) > 0 {
+			oldestInPage := statuses[len(statuses)-1].CreatedAt
+			newestInPage := statuses[0].CreatedAt
+			log.Printf("Page %d: Fetched %d posts from user %s (total: %d) - Date range: %s to %s",
+				pageCount, len(statuses), accountID, totalPosts, oldestInPage, newestInPage)
+		}
 
 		// Check if we've reached the maximum
 		if maxPosts > 0 && totalPosts >= maxPosts {
+			log.Printf("Reached maximum posts limit (%d) for user %s", maxPosts, accountID)
 			allStatuses = allStatuses[:maxPosts]
 			break
 		}
@@ -513,7 +526,16 @@ func (c *FediverseClient) getAllUserStatuses(accountID string, maxPosts int) ([]
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	log.Printf("Total posts fetched from user %s: %d", accountID, len(allStatuses))
+	// Log final summary with date range
+	if len(allStatuses) > 0 {
+		oldestPost := allStatuses[len(allStatuses)-1].CreatedAt
+		newestPost := allStatuses[0].CreatedAt
+		log.Printf("Total posts fetched from user %s: %d (pages: %d) - Date range: %s to %s",
+			accountID, len(allStatuses), pageCount, oldestPost, newestPost)
+	} else {
+		log.Printf("No posts found for user %s", accountID)
+	}
+
 	return allStatuses, nil
 }
 
@@ -821,6 +843,40 @@ func loadSessionCookieFromFile(filename string) string {
 	return ""
 }
 
+func saveSessionCookieToFile(filename string, sessionCookie string) error {
+	if sessionCookie == "" {
+		return fmt.Errorf("no session cookie to save")
+	}
+
+	// Create or truncate the cookies file
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create cookies file %s: %v", filename, err)
+	}
+	defer file.Close()
+
+	// Write Netscape cookie format header
+	_, err = file.WriteString("# Netscape HTTP Cookie File\n")
+	if err != nil {
+		return fmt.Errorf("failed to write cookie header: %v", err)
+	}
+
+	// Get current time for cookie expiration (1 year from now)
+	expiry := time.Now().AddDate(1, 0, 0)
+	expiryStr := strconv.FormatInt(expiry.Unix(), 10)
+
+	// Write session cookie in Netscape format
+	// Format: domain, subdomain, path, secure, expiry, name, value
+	cookieLine := fmt.Sprintf("archive.23.nu\tTRUE\t/\tTRUE\t%s\tsessionid\t%s\n", expiryStr, sessionCookie)
+	_, err = file.WriteString(cookieLine)
+	if err != nil {
+		return fmt.Errorf("failed to write session cookie: %v", err)
+	}
+
+	log.Printf("Saved new session cookie to %s", filename)
+	return nil
+}
+
 func (c *ArchiveBoxClient) login() error {
 	if c.isLoggedIn && c.sessionCookie != "" {
 		log.Printf("Already logged in with session cookie")
@@ -891,6 +947,10 @@ func (c *ArchiveBoxClient) login() error {
 			if c.sessionCookie != "" {
 				c.isLoggedIn = true
 				log.Printf("Successfully authenticated using existing session")
+				// Save the session cookie to file
+				if err := saveSessionCookieToFile("cookies.txt", c.sessionCookie); err != nil {
+					log.Printf("Warning: failed to save session cookie: %v", err)
+				}
 				return nil
 			}
 		}
@@ -950,6 +1010,10 @@ func (c *ArchiveBoxClient) login() error {
 				if c.sessionCookie != "" {
 					c.isLoggedIn = true
 					log.Printf("Successfully logged in to ArchiveBox using %s", endpoint)
+					// Save the session cookie to file
+					if err := saveSessionCookieToFile("cookies.txt", c.sessionCookie); err != nil {
+						log.Printf("Warning: failed to save session cookie: %v", err)
+					}
 					return nil
 				}
 				// If login was successful, we should get a redirect
@@ -980,6 +1044,10 @@ func (c *ArchiveBoxClient) login() error {
 								if c.sessionCookie != "" {
 									c.isLoggedIn = true
 									log.Printf("Successfully logged in to ArchiveBox using %s (after redirect)", endpoint)
+									// Save the session cookie to file
+									if err := saveSessionCookieToFile("cookies.txt", c.sessionCookie); err != nil {
+										log.Printf("Warning: failed to save session cookie: %v", err)
+									}
 									return nil
 								}
 							}

@@ -1,6 +1,6 @@
 {
   "fediverse": {
-    "instance_url": "https://your-fediverse-instance.com",
+    "instance_url": "https://your-instance.com",
     "username": "your-username",
     "password": "your-password",
     "token": "",
@@ -13,7 +13,7 @@
     "tag": "fediarchive"
   },
   "settings": {
-    "max_posts_per_user": 1000,
+    "max_posts_per_user": 5000,
     "include_visibility": ["public", "unlisted", "private"]
   }
 } 
