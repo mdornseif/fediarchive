@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
 	"github.com/mmcdole/gofeed"
 	"gopkg.in/yaml.v3"
 )
@@ -689,6 +690,27 @@ func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
 	for _, feedURL := range config.Settings.RSSFeeds {
 		log.Printf("Processing RSS feed: %s", feedURL)
 
+		// Check if the URL is a direct link to an RSS feed or a page to discover the feed from
+		if !strings.HasSuffix(feedURL, ".xml") {
+			log.Printf("URL does not end in .xml, attempting to discover RSS feed from page...")
+			discoveredURL, err := discoverRSSFeed(feedURL)
+			if err != nil {
+				log.Printf("Error discovering RSS feed from %s: %v", feedURL, err)
+				continue
+			}
+			log.Printf("Discovered RSS feed: %s", discoveredURL)
+			feedURL = discoveredURL
+		}
+
+		// Extract hostname from the RSS feed URL to filter out internal links
+		feedURLParsed, err := url.Parse(feedURL)
+		if err != nil {
+			log.Printf("Error parsing RSS feed URL %s: %v", feedURL, err)
+			continue
+		}
+		feedHostname := feedURLParsed.Hostname()
+		log.Printf("RSS feed hostname: %s", feedHostname)
+
 		parsedFeed, err := fp.ParseURL(feedURL)
 		if err != nil {
 			log.Printf("Error parsing RSS feed %s: %v", feedURL, err)
@@ -702,21 +724,39 @@ func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
 		for _, item := range parsedFeed.Items {
 			// Extract URLs from the item link
 			if item.Link != "" {
-				urlsToArchive[item.Link] = true
+				// Check if the link is on the same hostname as the RSS feed
+				itemURL, err := url.Parse(item.Link)
+				if err == nil && itemURL.Hostname() != feedHostname {
+					urlsToArchive[item.Link] = true
+				} else {
+					log.Printf("Skipping internal link from RSS feed: %s", item.Link)
+				}
 			}
 
 			// Extract URLs from the item description/content
 			if item.Description != "" {
 				urls := extractURLs(item.Description, "", make(map[string]bool), config.Settings.BlacklistedDomains)
-				for _, url := range urls {
-					urlsToArchive[url] = true
+				for _, urlStr := range urls {
+					// Check if the URL is on the same hostname as the RSS feed
+					urlParsed, err := url.Parse(urlStr)
+					if err == nil && urlParsed.Hostname() != feedHostname {
+						urlsToArchive[urlStr] = true
+					} else {
+						log.Printf("Skipping internal link from RSS feed: %s", urlStr)
+					}
 				}
 			}
 
 			// Check for enclosures (media links)
 			for _, enclosure := range item.Enclosures {
 				if enclosure.URL != "" && !isMediaAttachment(enclosure.URL) {
-					urlsToArchive[enclosure.URL] = true
+					// Check if the enclosure URL is on the same hostname as the RSS feed
+					enclosureURL, err := url.Parse(enclosure.URL)
+					if err == nil && enclosureURL.Hostname() != feedHostname {
+						urlsToArchive[enclosure.URL] = true
+					} else {
+						log.Printf("Skipping internal enclosure from RSS feed: %s", enclosure.URL)
+					}
 				}
 			}
 		}
@@ -1616,6 +1656,51 @@ func (c *ArchiveBoxClient) testConnection() error {
 	}
 
 	return fmt.Errorf("ArchiveBox connection failed - status: %d", resp.StatusCode)
+}
+
+func discoverRSSFeed(pageURL string) (string, error) {
+	// Make a GET request to the page
+	res, err := http.Get(pageURL)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != 200 {
+		return "", fmt.Errorf("failed to fetch page: status code %d", res.StatusCode)
+	}
+
+	// Load the HTML document
+	doc, err := goquery.NewDocumentFromReader(res.Body)
+	if err != nil {
+		return "", err
+	}
+
+	// Find the RSS link
+	rssLink, exists := doc.Find(`a[title="RSS"]`).Attr("href")
+	if !exists {
+		// Try another common pattern
+		rssLink, exists = doc.Find(`link[type="application/rss+xml"]`).Attr("href")
+	}
+
+	if !exists {
+		return "", fmt.Errorf("could not find RSS feed link on page %s", pageURL)
+	}
+
+	// If the link is relative, make it absolute
+	if !strings.HasPrefix(rssLink, "http") {
+		baseURL, err := url.Parse(pageURL)
+		if err != nil {
+			return "", err
+		}
+		rssURL, err := baseURL.Parse(rssLink)
+		if err != nil {
+			return "", err
+		}
+		return rssURL.String(), nil
+	}
+
+	return rssLink, nil
 }
 
 func main() {

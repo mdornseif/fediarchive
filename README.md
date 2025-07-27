@@ -110,7 +110,9 @@ The application can monitor RSS feeds from various sources (including Lemmy comm
 
 ### RSS Feed Configuration
 
-The application can monitor a list of RSS feed URLs.
+The application can monitor a list of RSS feed URLs. You can provide either:
+- Direct RSS feed URLs (ending in `.xml`)
+- Community page URLs (the application will automatically discover the RSS feed)
 
 ### Example RSS Configuration
 
@@ -118,8 +120,23 @@ The application can monitor a list of RSS feed URLs.
 settings:
   rss_feeds:
     - "https://natur.23.nu/feeds/c/kulturlandschaft.xml?sort=Active"
+    - "https://natur.23.nu/c/kulturlandschaft"
     - "https://example.com/feed.xml"
 ```
+
+### RSS Feed Discovery
+
+When you provide a community page URL (like `https://natur.23.nu/c/kulturlandschaft`), the application will:
+1. Fetch the page and look for the RSS feed link
+2. Automatically discover the correct RSS feed URL
+3. Process the feed and archive external links
+
+### Internal Link Filtering
+
+The application automatically filters out internal links from RSS feeds to avoid archiving:
+- Lemmy post links (e.g., `https://natur.23.nu/post/12345`)
+- Links to the same hostname as the RSS feed source
+- Only external content URLs are archived
 
 ### Lemmy Community RSS Feeds
 
