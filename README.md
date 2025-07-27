@@ -110,23 +110,15 @@ The application can monitor RSS feeds from various sources (including Lemmy comm
 
 ### RSS Feed Configuration
 
-Each RSS feed in the configuration should include:
-
-- `name`: A descriptive name for the feed
-- `url`: The RSS feed URL
-- `tag`: A tag to apply to archived URLs from this feed
+The application can monitor a list of RSS feed URLs.
 
 ### Example RSS Configuration
 
 ```yaml
 settings:
   rss_feeds:
-    - name: "Kulturlandschaft Community"
-      url: "https://natur.23.nu/feeds/c/kulturlandschaft.xml?sort=Active"
-      tag: "rss-kulturlandschaft"
-    - name: "Example Blog"
-      url: "https://example.com/feed.xml"
-      tag: "rss-example"
+    - "https://natur.23.nu/feeds/c/kulturlandschaft.xml?sort=Active"
+    - "https://example.com/feed.xml"
 ```
 
 ### Lemmy Community RSS Feeds

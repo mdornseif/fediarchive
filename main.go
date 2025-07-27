@@ -37,17 +37,11 @@ type Config struct {
 		Tag      string `json:"tag" yaml:"tag"`
 	} `json:"archivebox" yaml:"archivebox"`
 	Settings struct {
-		MaxPostsPerUser    int       `json:"max_posts_per_user" yaml:"max_posts_per_user"`
-		IncludeVisibility  []string  `json:"include_visibility" yaml:"include_visibility"`
-		BlacklistedDomains []string  `json:"blacklisted_domains" yaml:"blacklisted_domains"`
-		RSSFeeds           []RSSFeed `json:"rss_feeds" yaml:"rss_feeds"`
+		MaxPostsPerUser    int      `json:"max_posts_per_user" yaml:"max_posts_per_user"`
+		IncludeVisibility  []string `json:"include_visibility" yaml:"include_visibility"`
+		BlacklistedDomains []string `json:"blacklisted_domains" yaml:"blacklisted_domains"`
+		RSSFeeds           []string `json:"rss_feeds" yaml:"rss_feeds"`
 	} `json:"settings" yaml:"settings"`
-}
-
-type RSSFeed struct {
-	Name string `json:"name" yaml:"name"`
-	URL  string `json:"url" yaml:"url"`
-	Tag  string `json:"tag" yaml:"tag"`
 }
 
 // GoToSocial API types
@@ -692,16 +686,16 @@ func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
 
 	fp := gofeed.NewParser()
 
-	for _, feed := range config.Settings.RSSFeeds {
-		log.Printf("Processing RSS feed: %s (%s)", feed.Name, feed.URL)
+	for _, feedURL := range config.Settings.RSSFeeds {
+		log.Printf("Processing RSS feed: %s", feedURL)
 
-		parsedFeed, err := fp.ParseURL(feed.URL)
+		parsedFeed, err := fp.ParseURL(feedURL)
 		if err != nil {
-			log.Printf("Error parsing RSS feed %s: %v", feed.Name, err)
+			log.Printf("Error parsing RSS feed %s: %v", feedURL, err)
 			continue
 		}
 
-		log.Printf("Found %d items in RSS feed %s", len(parsedFeed.Items), feed.Name)
+		log.Printf("Found %d items in RSS feed %s", len(parsedFeed.Items), feedURL)
 
 		urlsToArchive := make(map[string]bool)
 
@@ -729,11 +723,11 @@ func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
 
 		// Archive the unique URLs
 		for url := range urlsToArchive {
-			log.Printf("Archiving URL from RSS feed %s: %s", feed.Name, url)
-			archiveClient.archiveURL(url, feed.Tag)
+			log.Printf("Archiving URL from RSS feed %s: %s", feedURL, url)
+			archiveClient.archiveURL(url, "") // No username for RSS feeds
 		}
 
-		log.Printf("Processed RSS feed %s: found %d unique URLs", feed.Name, len(urlsToArchive))
+		log.Printf("Processed RSS feed %s: found %d unique URLs", feedURL, len(urlsToArchive))
 	}
 }
 

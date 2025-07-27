@@ -20,6 +20,5 @@ settings:
         - test.blacklist.com
         - natur.23.nu
     rss_feeds:
-        - name: "Kulturlandschaft Community"
-          url: "https://natur.23.nu/feeds/c/kulturlandschaft.xml?sort=Active"
-          tag: "rss-kulturlandschaft"
+        - https://natur.23.nu/feeds/c/kulturlandschaft.xml
+        - https://natur.23.nu/c/solarpunk
