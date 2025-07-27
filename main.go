@@ -36,8 +36,9 @@ type Config struct {
 		Tag      string `json:"tag" yaml:"tag"`
 	} `json:"archivebox" yaml:"archivebox"`
 	Settings struct {
-		MaxPostsPerUser   int      `json:"max_posts_per_user" yaml:"max_posts_per_user"`
-		IncludeVisibility []string `json:"include_visibility" yaml:"include_visibility"`
+		MaxPostsPerUser    int      `json:"max_posts_per_user" yaml:"max_posts_per_user"`
+		IncludeVisibility  []string `json:"include_visibility" yaml:"include_visibility"`
+		BlacklistedDomains []string `json:"blacklisted_domains" yaml:"blacklisted_domains"`
 	} `json:"settings" yaml:"settings"`
 }
 
@@ -566,7 +567,7 @@ func (c *FediverseClient) getAllUserStatuses(accountID string, maxPosts int) ([]
 	return allStatuses, nil
 }
 
-func extractURLs(content string, instanceHostname string, fediverseHostnames map[string]bool) []string {
+func extractURLs(content string, instanceHostname string, fediverseHostnames map[string]bool, blacklistedDomains []string) []string {
 	urlRegex := regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
 	matches := urlRegex.FindAllString(content, -1)
 
@@ -578,6 +579,12 @@ func extractURLs(content string, instanceHostname string, fediverseHostnames map
 		// Skip internal Fediverse links
 		if isInternalFediverseLink(cleanURL, instanceHostname, fediverseHostnames) {
 			log.Printf("Skipping internal Fediverse link: %s", cleanURL)
+			continue
+		}
+
+		// Skip blacklisted domains
+		if isBlacklistedDomain(cleanURL, blacklistedDomains) {
+			log.Printf("Skipping blacklisted domain: %s", cleanURL)
 			continue
 		}
 
@@ -594,14 +601,14 @@ func extractURLs(content string, instanceHostname string, fediverseHostnames map
 }
 
 // extractURLsFromStatus extracts all URLs from a status, including boosts
-func extractURLsFromStatus(status Status, instanceHostname string, fediverseHostnames map[string]bool) []string {
+func extractURLsFromStatus(status Status, instanceHostname string, fediverseHostnames map[string]bool, blacklistedDomains []string) []string {
 	var urls []string
 
 	// Log visibility for debugging
 	log.Printf("Processing status %s (visibility: %s)", status.ID, status.Visibility)
 
 	// Extract URLs from main status content
-	contentURLs := extractURLs(status.Content, instanceHostname, fediverseHostnames)
+	contentURLs := extractURLs(status.Content, instanceHostname, fediverseHostnames, blacklistedDomains)
 	urls = append(urls, contentURLs...)
 
 	// Handle boosts (reblogs) - extract URLs from the boosted content
@@ -615,7 +622,7 @@ func extractURLsFromStatus(status Status, instanceHostname string, fediverseHost
 			// This is a boosted status object
 			log.Printf("Status %s contains a boost", status.ID)
 			if content, ok := reblogged["content"].(string); ok {
-				reblogURLs := extractURLs(content, instanceHostname, fediverseHostnames)
+				reblogURLs := extractURLs(content, instanceHostname, fediverseHostnames, blacklistedDomains)
 				urls = append(urls, reblogURLs...)
 				log.Printf("Extracted %d URLs from boosted content", len(reblogURLs))
 			}
@@ -808,6 +815,37 @@ func isInternalFediverseLink(urlStr string, instanceHostname string, fediverseHo
 			}
 
 			// If it's a Fediverse domain, it's likely internal unless it's a specific external link
+			return true
+		}
+	}
+
+	return false
+}
+
+func isBlacklistedDomain(urlStr string, blacklistedDomains []string) bool {
+	if len(blacklistedDomains) == 0 {
+		return false
+	}
+
+	// Parse the URL to get the hostname
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+
+	hostname := strings.ToLower(u.Hostname())
+
+	// Check if the hostname matches any blacklisted domain
+	for _, blacklistedDomain := range blacklistedDomains {
+		blacklistedDomain = strings.ToLower(strings.TrimSpace(blacklistedDomain))
+
+		// Exact match
+		if hostname == blacklistedDomain {
+			return true
+		}
+
+		// Subdomain match (e.g., blacklisted "example.com" matches "sub.example.com")
+		if strings.HasSuffix(hostname, "."+blacklistedDomain) {
 			return true
 		}
 	}
@@ -1696,7 +1734,7 @@ func main() {
 
 			processedCount++
 			// Extract all URLs from status (including boosts)
-			urls := extractURLsFromStatus(status, instanceHostname, fediverseHostnames)
+			urls := extractURLsFromStatus(status, instanceHostname, fediverseHostnames, config.Settings.BlacklistedDomains)
 			for _, url := range urls {
 				urlsToArchive[url] = true
 			}
@@ -1765,7 +1803,7 @@ func main() {
 
 				userProcessedCount++
 				// Extract all URLs from status (including boosts)
-				urls := extractURLsFromStatus(status, instanceHostname, fediverseHostnames)
+				urls := extractURLsFromStatus(status, instanceHostname, fediverseHostnames, config.Settings.BlacklistedDomains)
 				for _, url := range urls {
 					userURLsToArchive[url] = true
 				}

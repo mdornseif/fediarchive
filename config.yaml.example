@@ -16,4 +16,8 @@ settings:
   include_visibility:
     - "public"
     - "unlisted"
-    - "private" 
+    - "private"
+  blacklisted_domains:
+    - "example.com"
+    - "spam-site.com"
+    - "ads.example.org" 

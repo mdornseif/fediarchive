@@ -96,6 +96,7 @@ settings:
 - **settings**: Application settings
   - `max_posts_per_user`: Maximum posts to fetch per user
   - `include_visibility`: Which post visibilities to process
+  - `blacklisted_domains`: List of domains to exclude from archiving (optional)
 
 ## Usage
 
