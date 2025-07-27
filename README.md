@@ -97,6 +97,49 @@ settings:
   - `max_posts_per_user`: Maximum posts to fetch per user
   - `include_visibility`: Which post visibilities to process
   - `blacklisted_domains`: List of domains to exclude from archiving (optional)
+  - `rss_feeds`: List of RSS feeds to monitor and archive links from (optional)
+
+## RSS Feed Monitoring
+
+The application can monitor RSS feeds from various sources (including Lemmy communities) and automatically archive all links found in the feed items. This is useful for:
+
+- Monitoring Lemmy communities for new posts with links
+- Following blog RSS feeds
+- Archiving links from news sources
+- Tracking content from any RSS-enabled platform
+
+### RSS Feed Configuration
+
+Each RSS feed in the configuration should include:
+
+- `name`: A descriptive name for the feed
+- `url`: The RSS feed URL
+- `tag`: A tag to apply to archived URLs from this feed
+
+### Example RSS Configuration
+
+```yaml
+settings:
+  rss_feeds:
+    - name: "Kulturlandschaft Community"
+      url: "https://natur.23.nu/feeds/c/kulturlandschaft.xml?sort=Active"
+      tag: "rss-kulturlandschaft"
+    - name: "Example Blog"
+      url: "https://example.com/feed.xml"
+      tag: "rss-example"
+```
+
+### Lemmy Community RSS Feeds
+
+Most Lemmy communities provide RSS feeds at URLs like:
+- `https://instance.com/feeds/c/community.xml?sort=Active`
+- `https://instance.com/feeds/c/community.xml?sort=New`
+- `https://instance.com/feeds/c/community.xml?sort=Top`
+
+The RSS feed will extract URLs from:
+- Post links (the main URL being shared)
+- Enclosures (media attachments)
+- Content descriptions (if they contain URLs)
 
 ## Usage
 

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mmcdole/gofeed"
 	"gopkg.in/yaml.v3"
 )
 
@@ -36,10 +37,17 @@ type Config struct {
 		Tag      string `json:"tag" yaml:"tag"`
 	} `json:"archivebox" yaml:"archivebox"`
 	Settings struct {
-		MaxPostsPerUser    int      `json:"max_posts_per_user" yaml:"max_posts_per_user"`
-		IncludeVisibility  []string `json:"include_visibility" yaml:"include_visibility"`
-		BlacklistedDomains []string `json:"blacklisted_domains" yaml:"blacklisted_domains"`
+		MaxPostsPerUser    int       `json:"max_posts_per_user" yaml:"max_posts_per_user"`
+		IncludeVisibility  []string  `json:"include_visibility" yaml:"include_visibility"`
+		BlacklistedDomains []string  `json:"blacklisted_domains" yaml:"blacklisted_domains"`
+		RSSFeeds           []RSSFeed `json:"rss_feeds" yaml:"rss_feeds"`
 	} `json:"settings" yaml:"settings"`
+}
+
+type RSSFeed struct {
+	Name string `json:"name" yaml:"name"`
+	URL  string `json:"url" yaml:"url"`
+	Tag  string `json:"tag" yaml:"tag"`
 }
 
 // GoToSocial API types
@@ -672,6 +680,61 @@ func extractURLsFromStatus(status Status, instanceHostname string, fediverseHost
 	}
 
 	return uniqueURLs
+}
+
+func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
+	if len(config.Settings.RSSFeeds) == 0 {
+		log.Println("No RSS feeds configured, skipping RSS processing")
+		return
+	}
+
+	log.Printf("Processing %d RSS feeds...", len(config.Settings.RSSFeeds))
+
+	fp := gofeed.NewParser()
+
+	for _, feed := range config.Settings.RSSFeeds {
+		log.Printf("Processing RSS feed: %s (%s)", feed.Name, feed.URL)
+
+		parsedFeed, err := fp.ParseURL(feed.URL)
+		if err != nil {
+			log.Printf("Error parsing RSS feed %s: %v", feed.Name, err)
+			continue
+		}
+
+		log.Printf("Found %d items in RSS feed %s", len(parsedFeed.Items), feed.Name)
+
+		urlsToArchive := make(map[string]bool)
+
+		for _, item := range parsedFeed.Items {
+			// Extract URLs from the item link
+			if item.Link != "" {
+				urlsToArchive[item.Link] = true
+			}
+
+			// Extract URLs from the item description/content
+			if item.Description != "" {
+				urls := extractURLs(item.Description, "", make(map[string]bool), config.Settings.BlacklistedDomains)
+				for _, url := range urls {
+					urlsToArchive[url] = true
+				}
+			}
+
+			// Check for enclosures (media links)
+			for _, enclosure := range item.Enclosures {
+				if enclosure.URL != "" && !isMediaAttachment(enclosure.URL) {
+					urlsToArchive[enclosure.URL] = true
+				}
+			}
+		}
+
+		// Archive the unique URLs
+		for url := range urlsToArchive {
+			log.Printf("Archiving URL from RSS feed %s: %s", feed.Name, url)
+			archiveClient.archiveURL(url, feed.Tag)
+		}
+
+		log.Printf("Processed RSS feed %s: found %d unique URLs", feed.Name, len(urlsToArchive))
+	}
 }
 
 // shouldProcessStatus checks if a status should be processed based on visibility settings
@@ -1827,6 +1890,9 @@ func main() {
 			// Add delay between users to avoid rate limiting
 			time.Sleep(2 * time.Second)
 		}
+
+		// Process RSS feeds
+		processRSSFeeds(config, archiveClient)
 
 		log.Println("Archive process completed")
 

@@ -21,4 +21,11 @@ settings:
     - "example.com"
     - "spam-site.com"
     - "ads.example.org"
-    - "natur.23.nu" 
+    - "natur.23.nu"
+  rss_feeds:
+    - name: "Kulturlandschaft Community"
+      url: "https://natur.23.nu/feeds/c/kulturlandschaft.xml?sort=Active"
+      tag: "rss-kulturlandschaft"
+    - name: "Example Blog"
+      url: "https://example.com/feed.xml"
+      tag: "rss-example" 
