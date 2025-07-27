@@ -1,0 +1,14 @@
+{
+  "fediverse": {
+    "instance_url": "https://your-fediverse-instance.com",
+    "username": "your-username",
+    "password": "your-password",
+    "token": "",
+    "token_exp": ""
+  },
+  "archivebox": {
+    "url": "http://localhost:8000",
+    "username": "",
+    "password": ""
+  }
+} 

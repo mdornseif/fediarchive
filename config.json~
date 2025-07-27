@@ -1,0 +1,14 @@
+{
+  "gotosocial": {
+    "instance_url": "https://your-gotosocial-instance.com",
+    "username": "your-username",
+    "password": "your-password",
+    "client_id": "",
+    "client_secret": ""
+  },
+  "archivebox": {
+    "url": "https://archive.23.nu",
+    "username": "fediarchive",
+    "password": "iPaiketig0yaisho"
+  }
+} 

@@ -1,0 +1,28 @@
+# Configuration files with sensitive data
+config.json
+# Keep example config
+!config.json.example
+
+# Build artifacts
+archive-mastodon
+*.exe
+
+# Keep install script
+!install.sh
+
+# Go build cache
+*.o
+*.a
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log 
