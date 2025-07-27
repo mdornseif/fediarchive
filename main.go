@@ -1228,7 +1228,7 @@ func (c *ArchiveBoxClient) verifyLogin() error {
 	return nil
 }
 
-func (c *ArchiveBoxClient) archiveURL(urlStr string) error {
+func (c *ArchiveBoxClient) archiveURL(urlStr string, username string) error {
 	if err := c.login(); err != nil {
 		return fmt.Errorf("login failed: %v", err)
 	}
@@ -1261,7 +1261,7 @@ func (c *ArchiveBoxClient) archiveURL(urlStr string) error {
 				return fmt.Errorf("re-login failed: %v", err)
 			}
 			// Retry the request
-			return c.archiveURL(urlStr)
+			return c.archiveURL(urlStr, username)
 		}
 	}
 
@@ -1283,7 +1283,14 @@ func (c *ArchiveBoxClient) archiveURL(urlStr string) error {
 	addData.Set("url", urlStr)
 	addData.Set("parser", "url_list")
 	addData.Set("depth", "0")
-	addData.Set("tag", c.config.ArchiveBox.Tag)
+
+	// Combine base tag with username tag if provided
+	tag := c.config.ArchiveBox.Tag
+	if username != "" {
+		tag = fmt.Sprintf("%s,fediarchive-%s", tag, username)
+	}
+	addData.Set("tag", tag)
+	log.Printf("Archiving URL with tags: %s", tag)
 	addData.Set("force", "true")
 	addData.Set("csrfmiddlewaretoken", c.csrfToken)
 
@@ -1321,7 +1328,7 @@ func (c *ArchiveBoxClient) archiveURL(urlStr string) error {
 				return fmt.Errorf("re-login failed: %v", err)
 			}
 			// Retry the request
-			return c.archiveURL(urlStr)
+			return c.archiveURL(urlStr, username)
 		}
 	}
 
@@ -1526,7 +1533,7 @@ func main() {
 		// Archive URLs from home timeline
 		for url := range urlsToArchive {
 			log.Printf("Archiving URL from home timeline: %s", url)
-			if err := archiveClient.archiveURL(url); err != nil {
+			if err := archiveClient.archiveURL(url, ""); err != nil {
 				log.Printf("Failed to archive URL %s: %v", url, err)
 			}
 			// Add a small delay to avoid overwhelming the ArchiveBox instance
@@ -1595,7 +1602,7 @@ func main() {
 			// Archive URLs from user's posts
 			for url := range userURLsToArchive {
 				log.Printf("Archiving URL from user %s: %s", follower.Username, url)
-				if err := archiveClient.archiveURL(url); err != nil {
+				if err := archiveClient.archiveURL(url, follower.Username); err != nil {
 					log.Printf("Failed to archive URL %s: %v", url, err)
 				}
 				// Add a small delay to avoid overwhelming the ArchiveBox instance
