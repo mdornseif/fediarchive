@@ -554,6 +554,12 @@ func extractURLs(content string, instanceHostname string, fediverseHostnames map
 			continue
 		}
 
+		// Skip media attachments
+		if isMediaAttachment(cleanURL) {
+			log.Printf("Skipping media attachment: %s", cleanURL)
+			continue
+		}
+
 		urls = append(urls, cleanURL)
 	}
 
@@ -587,15 +593,13 @@ func extractURLsFromStatus(status Status, instanceHostname string, fediverseHost
 				log.Printf("Extracted %d URLs from boosted content", len(reblogURLs))
 			}
 
-			// Also check media attachments in the boosted status
+			// Also check media attachments in the boosted status (but skip the media files themselves)
 			if mediaAttachments, ok := reblogged["media_attachments"].([]interface{}); ok {
 				for _, media := range mediaAttachments {
 					if mediaMap, ok := media.(map[string]interface{}); ok {
-						if url, ok := mediaMap["url"].(string); ok && url != "" {
-							urls = append(urls, url)
-						}
-						if remoteURL, ok := mediaMap["remote_url"].(string); ok && remoteURL != "" {
-							urls = append(urls, remoteURL)
+						// Skip the actual media files, but we could potentially archive the text URL if it exists
+						if textURL, ok := mediaMap["text_url"].(string); ok && textURL != "" && !isMediaAttachment(textURL) {
+							urls = append(urls, textURL)
 						}
 					}
 				}
@@ -610,13 +614,11 @@ func extractURLsFromStatus(status Status, instanceHostname string, fediverseHost
 		}
 	}
 
-	// Extract URLs from media attachments
+	// Extract URLs from media attachments (but skip the media files themselves)
 	for _, media := range status.MediaAttachments {
-		if media.URL != "" {
-			urls = append(urls, media.URL)
-		}
-		if media.RemoteURL != "" {
-			urls = append(urls, media.RemoteURL)
+		// Skip the actual media files, but we could potentially archive the text URL if it exists
+		if media.TextURL != "" && !isMediaAttachment(media.TextURL) {
+			urls = append(urls, media.TextURL)
 		}
 	}
 
@@ -781,6 +783,42 @@ func isInternalFediverseLink(urlStr string, instanceHostname string, fediverseHo
 			// If it's a Fediverse domain, it's likely internal unless it's a specific external link
 			return true
 		}
+	}
+
+	return false
+}
+
+func isMediaAttachment(urlStr string) bool {
+	// Parse the URL to get the path
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+
+	// Check for common media attachment patterns
+	path := strings.ToLower(u.Path)
+
+	// Check for file server patterns
+	if strings.Contains(path, "/fileserver/") {
+		return true
+	}
+
+	// Check for media attachment patterns
+	if strings.Contains(path, "/media_attachments/") {
+		return true
+	}
+
+	// Check for common media file extensions
+	mediaExtensions := []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".avi", ".webm", ".mp3", ".wav", ".ogg"}
+	for _, ext := range mediaExtensions {
+		if strings.HasSuffix(path, ext) {
+			return true
+		}
+	}
+
+	// Check for attachment patterns in path
+	if strings.Contains(path, "/attachment/") {
+		return true
 	}
 
 	return false
@@ -1295,7 +1333,7 @@ func (c *ArchiveBoxClient) archiveURL(urlStr string, username string) error {
 	// Combine base tag with username tag if provided
 	tag := c.config.ArchiveBox.Tag
 	if username != "" {
-		tag = fmt.Sprintf("%s,fediarchive-%s", tag, username)
+		tag = fmt.Sprintf("%s,fediarchive:%s", tag, username)
 	}
 	addData.Set("tag", tag)
 	log.Printf("Archiving URL with tags: %s", tag)
