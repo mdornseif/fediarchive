@@ -1,0 +1,17 @@
+fediverse:
+    instance_url: https://social.23.nu
+    username: md+fediarchive@foxel.org
+    password: iPaiketig0yaisho
+    token: ZDK4MDBHOTKTMMVKNY0ZYTVLLWEZYTKTNDI5MGFJYTBLODUW
+    token_exp: ""
+archivebox:
+    url: https://archive.23.nu
+    username: fediarchive
+    password: iPaiketig0yaisho
+    tag: fediarchive
+settings:
+    max_posts_per_user: 5000
+    include_visibility:
+        - public
+        - unlisted
+        - private

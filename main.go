@@ -898,6 +898,43 @@ func loadConfig(filename string) (*Config, error) {
 	return &config, nil
 }
 
+// convertJSONToYAML converts an existing JSON config file to YAML format
+func convertJSONToYAML(jsonFilename string) error {
+	// Read the JSON file
+	data, err := os.ReadFile(jsonFilename)
+	if err != nil {
+		return fmt.Errorf("failed to read JSON config file %s: %v", jsonFilename, err)
+	}
+
+	// Parse JSON
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("failed to parse JSON config file %s: %v", jsonFilename, err)
+	}
+
+	// Create YAML filename
+	yamlFilename := strings.TrimSuffix(jsonFilename, ".json") + ".yaml"
+
+	// Write YAML file
+	yamlData, err := yaml.Marshal(&config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config to YAML: %v", err)
+	}
+
+	if err := os.WriteFile(yamlFilename, yamlData, 0644); err != nil {
+		return fmt.Errorf("failed to write YAML config file %s: %v", yamlFilename, err)
+	}
+
+	// Backup the original JSON file
+	backupFilename := jsonFilename + ".backup"
+	if err := os.Rename(jsonFilename, backupFilename); err != nil {
+		return fmt.Errorf("failed to backup JSON config file: %v", err)
+	}
+
+	log.Printf("Converted %s to %s and backed up original as %s", jsonFilename, yamlFilename, backupFilename)
+	return nil
+}
+
 type ArchiveBoxClient struct {
 	config        *Config
 	httpClient    *http.Client
@@ -1507,6 +1544,20 @@ func main() {
 
 	if config == nil {
 		log.Fatalf("Failed to load any configuration file. Tried: %v", configFiles)
+	}
+
+	// If we loaded from JSON, automatically convert it to YAML for future use
+	if strings.HasSuffix(configFiles[len(configFiles)-1], ".json") {
+		// Check if we actually loaded from JSON (not YAML)
+		if _, err := os.Stat("config.json"); err == nil {
+			// Check if YAML doesn't exist
+			if _, err := os.Stat("config.yaml"); os.IsNotExist(err) {
+				log.Println("Converting JSON configuration to YAML format...")
+				if err := convertJSONToYAML("config.json"); err != nil {
+					log.Printf("Warning: Failed to convert JSON to YAML: %v", err)
+				}
+			}
+		}
 	}
 
 	// Initialize clients
