@@ -36,10 +36,34 @@ sudo nano /opt/archive-mastodon/config.json
   "archivebox": {
     "url": "http://localhost:8000",
     "username": "",
-    "password": ""
+    "password": "",
+    "tag": "fediarchive"
+  },
+  "settings": {
+    "max_posts_per_user": 1000,
+    "include_visibility": ["public", "unlisted", "private"]
   }
 }
 ```
+
+### Configuration Options
+
+- **fediverse**: Fediverse instance configuration
+  - `instance_url`: Your Fediverse instance URL
+  - `username`: Your username/email
+  - `password`: Your password
+  - `token`: OAuth token (auto-generated)
+  - `token_exp`: Token expiration (auto-managed)
+
+- **archivebox**: ArchiveBox configuration
+  - `url`: ArchiveBox instance URL
+  - `username`: ArchiveBox admin username
+  - `password`: ArchiveBox admin password
+  - `tag`: Tag to apply to archived URLs (configurable)
+
+- **settings**: Application settings
+  - `max_posts_per_user`: Maximum posts to fetch per user
+  - `include_visibility`: Which post visibilities to process
 
 ## Usage
 

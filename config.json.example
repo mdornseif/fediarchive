@@ -9,7 +9,8 @@
   "archivebox": {
     "url": "http://localhost:8000",
     "username": "",
-    "password": ""
+    "password": "",
+    "tag": "fediarchive"
   },
   "settings": {
     "max_posts_per_user": 1000,
