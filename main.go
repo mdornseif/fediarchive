@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,11 +13,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/mmcdole/gofeed"
 	"gopkg.in/yaml.v3"
 )
@@ -31,12 +32,13 @@ type Config struct {
 		Token       string `json:"token" yaml:"token"`
 		TokenExp    string `json:"token_exp" yaml:"token_exp"`
 	} `json:"fediverse" yaml:"fediverse"`
-	ArchiveBox struct {
-		URL      string `json:"url" yaml:"url"`
-		Username string `json:"username" yaml:"username"`
-		Password string `json:"password" yaml:"password"`
-		Tag      string `json:"tag" yaml:"tag"`
-	} `json:"archivebox" yaml:"archivebox"`
+	S3 struct {
+		Endpoint  string `json:"endpoint" yaml:"endpoint"`
+		AccessKey string `json:"access_key" yaml:"access_key"`
+		SecretKey string `json:"secret_key" yaml:"secret_key"`
+		Bucket    string `json:"bucket" yaml:"bucket"`
+		UseSSL    bool   `json:"use_ssl" yaml:"use_ssl"`
+	} `json:"s3" yaml:"s3"`
 	Settings struct {
 		MaxPostsPerUser    int      `json:"max_posts_per_user" yaml:"max_posts_per_user"`
 		IncludeVisibility  []string `json:"include_visibility" yaml:"include_visibility"`
@@ -363,7 +365,7 @@ func (c *FediverseClient) saveConfig() error {
 	}
 }
 
-func (c *FediverseClient) getFollowers() ([]Account, error) {
+func (c *FediverseClient) getCurrentAccount() (*Account, error) {
 	req, err := http.NewRequest("GET", c.config.Fediverse.InstanceURL+"/api/v1/accounts/verify_credentials", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create verify credentials request: %w", err)
@@ -381,14 +383,23 @@ func (c *FediverseClient) getFollowers() ([]Account, error) {
 		return nil, fmt.Errorf("failed to decode account response: %w", err)
 	}
 
+	return &currentAccount, nil
+}
+
+func (c *FediverseClient) getFollowers() ([]Account, error) {
+	currentAccount, err := c.getCurrentAccount()
+	if err != nil {
+		return nil, err
+	}
+
 	// Get followers
-	req, err = http.NewRequest("GET", c.config.Fediverse.InstanceURL+"/api/v1/accounts/"+currentAccount.ID+"/followers", nil)
+	req, err := http.NewRequest("GET", c.config.Fediverse.InstanceURL+"/api/v1/accounts/"+currentAccount.ID+"/followers", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create followers request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.accessToken)
 
-	resp, err = c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get followers: %w", err)
 	}
@@ -677,7 +688,7 @@ func extractURLsFromStatus(status Status, instanceHostname string, fediverseHost
 	return uniqueURLs
 }
 
-func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
+func processRSSFeeds(config *Config, urlsToArchive map[string]bool) {
 	if len(config.Settings.RSSFeeds) == 0 {
 		log.Println("No RSS feeds configured, skipping RSS processing")
 		return
@@ -719,14 +730,16 @@ func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
 
 		log.Printf("Found %d items in RSS feed %s", len(parsedFeed.Items), feedURL)
 
-		urlsToArchive := make(map[string]bool)
-
+		feedURLCount := 0
 		for _, item := range parsedFeed.Items {
 			// Extract URLs from the item link
 			if item.Link != "" {
 				// Check if the link is on the same hostname as the RSS feed
 				itemURL, err := url.Parse(item.Link)
 				if err == nil && itemURL.Hostname() != feedHostname {
+					if !urlsToArchive[item.Link] {
+						feedURLCount++
+					}
 					urlsToArchive[item.Link] = true
 				} else {
 					log.Printf("Skipping internal link from RSS feed: %s", item.Link)
@@ -740,6 +753,9 @@ func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
 					// Check if the URL is on the same hostname as the RSS feed
 					urlParsed, err := url.Parse(urlStr)
 					if err == nil && urlParsed.Hostname() != feedHostname {
+						if !urlsToArchive[urlStr] {
+							feedURLCount++
+						}
 						urlsToArchive[urlStr] = true
 					} else {
 						log.Printf("Skipping internal link from RSS feed: %s", urlStr)
@@ -753,6 +769,9 @@ func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
 					// Check if the enclosure URL is on the same hostname as the RSS feed
 					enclosureURL, err := url.Parse(enclosure.URL)
 					if err == nil && enclosureURL.Hostname() != feedHostname {
+						if !urlsToArchive[enclosure.URL] {
+							feedURLCount++
+						}
 						urlsToArchive[enclosure.URL] = true
 					} else {
 						log.Printf("Skipping internal enclosure from RSS feed: %s", enclosure.URL)
@@ -761,13 +780,7 @@ func processRSSFeeds(config *Config, archiveClient *ArchiveBoxClient) {
 			}
 		}
 
-		// Archive the unique URLs
-		for url := range urlsToArchive {
-			log.Printf("Archiving URL from RSS feed %s: %s", feedURL, url)
-			archiveClient.archiveURL(url, "") // No username for RSS feeds
-		}
-
-		log.Printf("Processed RSS feed %s: found %d unique URLs", feedURL, len(urlsToArchive))
+		log.Printf("Processed RSS feed %s: found %d new unique URLs", feedURL, feedURLCount)
 	}
 }
 
@@ -1070,592 +1083,166 @@ func convertJSONToYAML(jsonFilename string) error {
 	return nil
 }
 
-type ArchiveBoxClient struct {
-	config        *Config
-	httpClient    *http.Client
-	sessionCookie string
-	csrfToken     string
-	isLoggedIn    bool
+type S3Client struct {
+	config      *Config
+	minioClient *minio.Client
 }
 
-func NewArchiveBoxClient(config *Config) *ArchiveBoxClient {
-	// Load existing session cookie from cookies.txt
-	sessionCookie := loadSessionCookieFromFile("cookies.txt")
-	if sessionCookie != "" {
-		log.Printf("Loaded existing session cookie: %s", sessionCookie)
-	}
+func NewS3Client(config *Config) (*S3Client, error) {
+	endpoint := config.S3.Endpoint
+	accessKeyID := config.S3.AccessKey
+	secretAccessKey := config.S3.SecretKey
+	useSSL := config.S3.UseSSL
+	bucket := config.S3.Bucket
 
-	return &ArchiveBoxClient{
-		config:        config,
-		httpClient:    &http.Client{Timeout: 60 * time.Second},
-		sessionCookie: sessionCookie,
-		isLoggedIn:    sessionCookie != "",
+	log.Printf("Initializing S3 client...")
+	log.Printf("  Endpoint: %s", endpoint)
+	log.Printf("  Access Key ID: %s", accessKeyID)
+	secretKeyPreview := secretAccessKey
+	if len(secretAccessKey) > 8 {
+		secretKeyPreview = secretAccessKey[:8]
 	}
+	log.Printf("  Secret Key: %s... (length: %d)", secretKeyPreview, len(secretAccessKey))
+	log.Printf("  Bucket: %s", bucket)
+	log.Printf("  Use SSL: %v", useSSL)
+
+	minioClient, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
+		Secure: useSSL,
+	})
+	if err != nil {
+		log.Printf("ERROR: Failed to create S3 client: %v", err)
+		return nil, fmt.Errorf("failed to create S3 client: %w", err)
+	}
+	log.Printf("S3 client created successfully")
+
+	return &S3Client{
+		config:      config,
+		minioClient: minioClient,
+	}, nil
 }
 
-func loadSessionCookieFromFile(filename string) string {
-	file, err := os.Open(filename)
-	if err != nil {
-		log.Printf("Could not open cookies file %s: %v", filename, err)
-		return ""
-	}
-	defer file.Close()
+func (c *S3Client) uploadURLs(urls []string, accountName string) error {
+	log.Printf("=== Starting S3 upload process ===")
+	log.Printf("Number of URLs to upload: %d", len(urls))
+	log.Printf("Account name: %s", accountName)
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || (strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "#HttpOnly_")) {
-			continue
-		}
-
-		// Handle HttpOnly cookies (remove #HttpOnly_ prefix)
-		if strings.HasPrefix(line, "#HttpOnly_") {
-			line = strings.TrimPrefix(line, "#HttpOnly_")
-		}
-
-		// Parse Netscape cookie format
-		fields := strings.Split(line, "\t")
-		if len(fields) >= 7 {
-			name := fields[5]
-			value := fields[6]
-			if name == "sessionid" {
-				return value
-			}
-		}
-	}
-
-	return ""
-}
-
-func saveSessionCookieToFile(filename string, sessionCookie string) error {
-	if sessionCookie == "" {
-		return fmt.Errorf("no session cookie to save")
-	}
-
-	// Create or truncate the cookies file
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to create cookies file %s: %v", filename, err)
-	}
-	defer file.Close()
-
-	// Write Netscape cookie format header
-	_, err = file.WriteString("# Netscape HTTP Cookie File\n")
-	if err != nil {
-		return fmt.Errorf("failed to write cookie header: %v", err)
-	}
-
-	// Get current time for cookie expiration (1 year from now)
-	expiry := time.Now().AddDate(1, 0, 0)
-	expiryStr := strconv.FormatInt(expiry.Unix(), 10)
-
-	// Write session cookie in Netscape format
-	// Format: domain, subdomain, path, secure, expiry, name, value
-	cookieLine := fmt.Sprintf("archive.23.nu\tTRUE\t/\tTRUE\t%s\tsessionid\t%s\n", expiryStr, sessionCookie)
-	_, err = file.WriteString(cookieLine)
-	if err != nil {
-		return fmt.Errorf("failed to write session cookie: %v", err)
-	}
-
-	log.Printf("Saved new session cookie to %s", filename)
-	return nil
-}
-
-func (c *ArchiveBoxClient) login() error {
-	if c.isLoggedIn && c.sessionCookie != "" {
-		log.Printf("Already logged in with session cookie")
+	if len(urls) == 0 {
+		log.Println("No URLs to upload, skipping")
 		return nil
 	}
 
-	// If we have a session cookie from cookies.txt, try to use it
-	if c.sessionCookie != "" {
-		log.Printf("Testing existing session cookie")
-		// Test if the session is still valid by accessing the add page
-		addURL := c.config.ArchiveBox.URL + "/add/"
-		req, err := http.NewRequest("GET", addURL, nil)
-		if err != nil {
-			return fmt.Errorf("failed to create request: %v", err)
-		}
+	// Sanitize account name for filename (remove special characters, replace @ with -)
+	sanitizedAccountName := strings.ReplaceAll(accountName, "@", "-")
+	sanitizedAccountName = strings.ReplaceAll(sanitizedAccountName, "/", "-")
+	sanitizedAccountName = strings.ReplaceAll(sanitizedAccountName, "\\", "-")
+	sanitizedAccountName = strings.ReplaceAll(sanitizedAccountName, " ", "-")
 
-		// Add the session cookie
-		req.AddCookie(&http.Cookie{Name: "sessionid", Value: c.sessionCookie})
+	// Create timestamped filename with account name
+	timestamp := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("%s-urls-%s.txt", sanitizedAccountName, timestamp)
+	log.Printf("Generated filename: %s", filename)
 
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("failed to test session: %v", err)
-		}
-		defer resp.Body.Close()
-
-		body, _ := io.ReadAll(resp.Body)
-		if strings.Contains(string(body), "Add URLs to Archive") || strings.Contains(string(body), "Archived Sites") {
-			log.Printf("Existing session cookie is valid")
-			c.isLoggedIn = true
-			return nil
+	// Create temporary file
+	log.Printf("Creating temporary file...")
+	tmpFile, err := os.CreateTemp("", filename)
+	if err != nil {
+		log.Printf("ERROR: Failed to create temporary file: %v", err)
+		return fmt.Errorf("failed to create temporary file: %w", err)
+	}
+	log.Printf("Temporary file created: %s", tmpFile.Name())
+	defer func() {
+		if err := os.Remove(tmpFile.Name()); err != nil {
+			log.Printf("Warning: Failed to remove temporary file %s: %v", tmpFile.Name(), err)
 		} else {
-			log.Printf("Existing session cookie is invalid, will try to login")
-			c.sessionCookie = ""
-			c.isLoggedIn = false
+			log.Printf("Cleaned up temporary file: %s", tmpFile.Name())
+		}
+	}()
+	defer tmpFile.Close()
+
+	// Write URLs to file (one per line)
+	log.Printf("Writing %d URLs to temporary file...", len(urls))
+	writtenCount := 0
+	for i, urlStr := range urls {
+		if _, err := tmpFile.WriteString(urlStr + "\n"); err != nil {
+			log.Printf("ERROR: Failed to write URL #%d to file: %v", i+1, err)
+			log.Printf("  URL was: %s", urlStr)
+			return fmt.Errorf("failed to write URL to file: %w", err)
+		}
+		writtenCount++
+		if (i+1)%100 == 0 {
+			log.Printf("  Written %d/%d URLs...", i+1, len(urls))
 		}
 	}
+	log.Printf("Successfully wrote %d URLs to temporary file", writtenCount)
 
-	// Step 1: Try to access the add page directly first
-	addURL := c.config.ArchiveBox.URL + "/add/"
-	resp, err := c.httpClient.Get(addURL)
+	// Close file before uploading
+	log.Printf("Closing temporary file...")
+	if err := tmpFile.Close(); err != nil {
+		log.Printf("ERROR: Failed to close temporary file: %v", err)
+		return fmt.Errorf("failed to close temporary file: %w", err)
+	}
+	log.Printf("Temporary file closed successfully")
+
+	// Open file for reading
+	log.Printf("Opening temporary file for reading...")
+	file, err := os.Open(tmpFile.Name())
 	if err != nil {
-		return fmt.Errorf("failed to access add page: %v", err)
+		log.Printf("ERROR: Failed to open file for upload: %v", err)
+		return fmt.Errorf("failed to open file for upload: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Printf("Warning: Failed to close file: %v", err)
+		}
+	}()
 
-	body, err := io.ReadAll(resp.Body)
+	// Get file info for size
+	log.Printf("Getting file information...")
+	fileInfo, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("failed to read add page: %v", err)
+		log.Printf("ERROR: Failed to get file info: %v", err)
+		return fmt.Errorf("failed to get file info: %w", err)
 	}
+	fileSize := fileInfo.Size()
+	log.Printf("File size: %d bytes (%.2f KB)", fileSize, float64(fileSize)/1024.0)
 
-	// Check if we're already authenticated (got the add page)
-	if strings.Contains(string(body), "Add URLs to Archive") || strings.Contains(string(body), "Archived Sites") {
-		// Extract CSRF token from the add page
-		csrfRegex := regexp.MustCompile(`name="csrfmiddlewaretoken" value="([^"]+)"`)
-		csrfMatches := csrfRegex.FindStringSubmatch(string(body))
-		if len(csrfMatches) >= 2 {
-			c.csrfToken = csrfMatches[1]
-			log.Printf("Already authenticated, extracted CSRF token from add page: %s", c.csrfToken)
+	// Upload to S3
+	ctx := context.Background()
+	bucketName := c.config.S3.Bucket
+	log.Printf("Preparing to upload to S3...")
+	log.Printf("  Bucket: %s", bucketName)
+	log.Printf("  Object key: %s", filename)
+	log.Printf("  File size: %d bytes", fileSize)
+	log.Printf("Note: Skipping bucket existence check (write-only permissions)")
 
-			// Check for session cookie
-			for _, cookie := range resp.Cookies() {
-				if cookie.Name == "sessionid" {
-					c.sessionCookie = cookie.Value
-					log.Printf("Found existing session cookie: %s", cookie.Value)
-				}
-			}
+	// Upload the file directly (skip bucket existence check due to write-only permissions)
+	log.Printf("Starting file upload to S3...")
+	log.Printf("  Bucket: %s", bucketName)
+	log.Printf("  Object key: %s", filename)
+	log.Printf("  Content-Type: text/plain")
+	log.Printf("  File size: %d bytes", fileSize)
 
-			if c.sessionCookie != "" {
-				c.isLoggedIn = true
-				log.Printf("Successfully authenticated using existing session")
-				// Save the session cookie to file
-				if err := saveSessionCookieToFile("cookies.txt", c.sessionCookie); err != nil {
-					log.Printf("Warning: failed to save session cookie: %v", err)
-				}
-				return nil
-			}
-		}
-	}
-
-	// Check if we got the login page directly (not a redirect)
-	if strings.Contains(string(body), "Log in") || strings.Contains(string(body), "login-form") {
-		log.Printf("Got login page directly, extracting CSRF token")
-		// Extract CSRF token from the login form
-		csrfRegex := regexp.MustCompile(`name="csrfmiddlewaretoken" value="([^"]+)"`)
-		csrfMatches := csrfRegex.FindStringSubmatch(string(body))
-		if len(csrfMatches) >= 2 {
-			c.csrfToken = csrfMatches[1]
-			log.Printf("Extracted CSRF token from login page: %s", c.csrfToken)
-
-			// Try both /admin/login/ and /accounts/login/ endpoints
-			loginEndpoints := []string{"/admin/login/", "/accounts/login/"}
-			for _, endpoint := range loginEndpoints {
-				loginURL := c.config.ArchiveBox.URL + endpoint
-				loginData := url.Values{}
-				loginData.Set("username", c.config.ArchiveBox.Username)
-				loginData.Set("password", c.config.ArchiveBox.Password)
-				loginData.Set("csrfmiddlewaretoken", c.csrfToken)
-				loginData.Set("next", "/add/")
-
-				loginReq, err := http.NewRequest("POST", loginURL, strings.NewReader(loginData.Encode()))
-				if err != nil {
-					log.Printf("Failed to create login request for %s: %v", endpoint, err)
-					continue
-				}
-
-				loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-				loginReq.Header.Set("Referer", addURL)
-
-				// Add cookies from the response
-				for _, cookie := range resp.Cookies() {
-					loginReq.AddCookie(cookie)
-				}
-				// Also add CSRF token as a cookie
-				loginReq.AddCookie(&http.Cookie{Name: "csrftoken", Value: c.csrfToken})
-
-				loginResp, err := c.httpClient.Do(loginReq)
-				if err != nil {
-					log.Printf("Failed to submit login to %s: %v", endpoint, err)
-					continue
-				}
-				defer loginResp.Body.Close()
-
-				// Store session cookies
-				for _, cookie := range loginResp.Cookies() {
-					if cookie.Name == "sessionid" {
-						c.sessionCookie = cookie.Value
-						log.Printf("Got session cookie: %s", cookie.Value)
-					}
-				}
-
-				if c.sessionCookie != "" {
-					c.isLoggedIn = true
-					log.Printf("Successfully logged in to ArchiveBox using %s", endpoint)
-					// Save the session cookie to file
-					if err := saveSessionCookieToFile("cookies.txt", c.sessionCookie); err != nil {
-						log.Printf("Warning: failed to save session cookie: %v", err)
-					}
-					return nil
-				}
-				// If login was successful, we should get a redirect
-				if loginResp.StatusCode == http.StatusFound || loginResp.StatusCode == http.StatusMovedPermanently {
-					location := loginResp.Header.Get("Location")
-					if location != "" {
-						if !strings.HasPrefix(location, "http") {
-							if strings.HasPrefix(location, "/") {
-								location = c.config.ArchiveBox.URL + location
-							} else {
-								location = addURL + "/" + location
-							}
-						}
-						followReq, err := http.NewRequest("GET", location, nil)
-						if err == nil {
-							for _, cookie := range loginResp.Cookies() {
-								followReq.AddCookie(cookie)
-							}
-							followResp, err := c.httpClient.Do(followReq)
-							if err == nil {
-								defer followResp.Body.Close()
-								for _, cookie := range followResp.Cookies() {
-									if cookie.Name == "sessionid" {
-										c.sessionCookie = cookie.Value
-										log.Printf("Got session cookie after redirect: %s", cookie.Value)
-									}
-								}
-								if c.sessionCookie != "" {
-									c.isLoggedIn = true
-									log.Printf("Successfully logged in to ArchiveBox using %s (after redirect)", endpoint)
-									// Save the session cookie to file
-									if err := saveSessionCookieToFile("cookies.txt", c.sessionCookie); err != nil {
-										log.Printf("Warning: failed to save session cookie: %v", err)
-									}
-									return nil
-								}
-							}
-						}
-					}
-				}
-			}
-
-			return fmt.Errorf("login failed: no session cookie received from any endpoint")
-		}
-	}
-
-	// If not authenticated, follow redirects to get to the login page
-	currentURL := addURL
-	for resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
-		location := resp.Header.Get("Location")
-		if location == "" {
-			break
-		}
-
-		// Handle relative URLs
-		if !strings.HasPrefix(location, "http") {
-			if strings.HasPrefix(location, "/") {
-				location = c.config.ArchiveBox.URL + location
-			} else {
-				location = currentURL + "/" + location
-			}
-		}
-
-		currentURL = location
-		resp, err = c.httpClient.Get(location)
-		if err != nil {
-			return fmt.Errorf("failed to follow redirect to %s: %v", location, err)
-		}
-		defer resp.Body.Close()
-	}
-
-	// Now we should be at the login page
-	body, err = io.ReadAll(resp.Body)
+	uploadInfo, err := c.minioClient.PutObject(ctx, bucketName, filename, file, fileInfo.Size(), minio.PutObjectOptions{
+		ContentType: "text/plain",
+	})
 	if err != nil {
-		return fmt.Errorf("failed to read login page: %v", err)
+		log.Printf("ERROR: Failed to upload file to S3: %v", err)
+		log.Printf("  Bucket: %s", bucketName)
+		log.Printf("  Object key: %s", filename)
+		log.Printf("  Endpoint: %s", c.config.S3.Endpoint)
+		log.Printf("  Access Key ID: %s", c.config.S3.AccessKey)
+		return fmt.Errorf("failed to upload file to S3: %w", err)
 	}
 
-	// Extract CSRF token from the login form
-	csrfRegex := regexp.MustCompile(`name="csrfmiddlewaretoken" value="([^"]+)"`)
-	csrfMatches := csrfRegex.FindStringSubmatch(string(body))
-	if len(csrfMatches) < 2 {
-		return fmt.Errorf("failed to extract CSRF token from login page")
-	}
-	c.csrfToken = csrfMatches[1]
-	log.Printf("Extracted CSRF token: %s", c.csrfToken)
-
-	// Try both /admin/login/ and /accounts/login/ endpoints
-	loginEndpoints := []string{"/admin/login/", "/accounts/login/"}
-	for _, endpoint := range loginEndpoints {
-		loginURL := c.config.ArchiveBox.URL + endpoint
-		loginData := url.Values{}
-		loginData.Set("username", c.config.ArchiveBox.Username)
-		loginData.Set("password", c.config.ArchiveBox.Password)
-		loginData.Set("csrfmiddlewaretoken", c.csrfToken)
-		loginData.Set("next", "/add/")
-
-		loginReq, err := http.NewRequest("POST", loginURL, strings.NewReader(loginData.Encode()))
-		if err != nil {
-			log.Printf("Failed to create login request for %s: %v", endpoint, err)
-			continue
-		}
-
-		loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		loginReq.Header.Set("Referer", currentURL)
-
-		// Add cookies from the login page response
-		for _, cookie := range resp.Cookies() {
-			loginReq.AddCookie(cookie)
-		}
-		// Also add CSRF token as a cookie
-		loginReq.AddCookie(&http.Cookie{Name: "csrftoken", Value: c.csrfToken})
-
-		loginResp, err := c.httpClient.Do(loginReq)
-		if err != nil {
-			log.Printf("Failed to submit login to %s: %v", endpoint, err)
-			continue
-		}
-		defer loginResp.Body.Close()
-
-		// Store session cookies
-		for _, cookie := range loginResp.Cookies() {
-			if cookie.Name == "sessionid" {
-				c.sessionCookie = cookie.Value
-				log.Printf("Got session cookie: %s", cookie.Value)
-			}
-		}
-
-		if c.sessionCookie != "" {
-			c.isLoggedIn = true
-			log.Printf("Successfully logged in to ArchiveBox using %s", endpoint)
-			// Save the session cookie to file
-			if err := saveSessionCookieToFile("cookies.txt", c.sessionCookie); err != nil {
-				log.Printf("Warning: failed to save session cookie: %v", err)
-			}
-			return nil
-		}
-		// If login was successful, we should get a redirect
-		if loginResp.StatusCode == http.StatusFound || loginResp.StatusCode == http.StatusMovedPermanently {
-			location := loginResp.Header.Get("Location")
-			if location != "" {
-				if !strings.HasPrefix(location, "http") {
-					if strings.HasPrefix(location, "/") {
-						location = c.config.ArchiveBox.URL + location
-					} else {
-						location = currentURL + "/" + location
-					}
-				}
-				followReq, err := http.NewRequest("GET", location, nil)
-				if err == nil {
-					for _, cookie := range loginResp.Cookies() {
-						followReq.AddCookie(cookie)
-					}
-					followResp, err := c.httpClient.Do(followReq)
-					if err == nil {
-						defer followResp.Body.Close()
-						for _, cookie := range followResp.Cookies() {
-							if cookie.Name == "sessionid" {
-								c.sessionCookie = cookie.Value
-								log.Printf("Got session cookie after redirect: %s", cookie.Value)
-							}
-						}
-						if c.sessionCookie != "" {
-							c.isLoggedIn = true
-							log.Printf("Successfully logged in to ArchiveBox using %s (after redirect)", endpoint)
-							// Save the session cookie to file
-							if err := saveSessionCookieToFile("cookies.txt", c.sessionCookie); err != nil {
-								log.Printf("Warning: failed to save session cookie: %v", err)
-							}
-							return nil
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return fmt.Errorf("login failed: no session cookie received from any endpoint")
-}
-
-func (c *ArchiveBoxClient) verifyLogin() error {
-	log.Printf("Verifying login by accessing admin page...")
-
-	req, err := http.NewRequest("GET", c.config.ArchiveBox.URL+"/admin/", nil)
-	if err != nil {
-		return fmt.Errorf("failed to create verification request: %w", err)
-	}
-
-	// Add cookies
-	var cookies []string
-	if c.sessionCookie != "" {
-		cookies = append(cookies, "sessionid="+c.sessionCookie)
-	}
-	if c.csrfToken != "" { // Changed from c.csrfCookie to c.csrfToken
-		cookies = append(cookies, "csrftoken="+c.csrfToken)
-	}
-	if len(cookies) > 0 {
-		req.Header.Set("Cookie", strings.Join(cookies, "; "))
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to verify login: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Get session cookie from verification response
-	for _, cookie := range resp.Cookies() {
-		if cookie.Name == "sessionid" {
-			c.sessionCookie = cookie.Value
-			break
-		}
-	}
-
-	if c.sessionCookie == "" {
-		return fmt.Errorf("still no session cookie after verification")
-	}
-
-	c.isLoggedIn = true
-	log.Printf("Login verified successfully")
+	log.Printf("=== S3 upload completed successfully ===")
+	log.Printf("Upload Info:")
+	log.Printf("  ETag: %s", uploadInfo.ETag)
+	log.Printf("  Location: %s", uploadInfo.Location)
+	log.Printf("  Version ID: %s", uploadInfo.VersionID)
+	log.Printf("Successfully uploaded %d URLs to S3: s3://%s/%s", len(urls), bucketName, filename)
+	log.Printf("Full S3 URL: s3://%s/%s", bucketName, filename)
 	return nil
-}
-
-func (c *ArchiveBoxClient) archiveURL(urlStr string, username string) error {
-	if err := c.login(); err != nil {
-		return fmt.Errorf("login failed: %v", err)
-	}
-
-	// Step 1: Get the add page to extract CSRF token
-	addURL := c.config.ArchiveBox.URL + "/add/"
-	req, err := http.NewRequest("GET", addURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
-	}
-
-	// Add session cookie
-	if c.sessionCookie != "" {
-		req.AddCookie(&http.Cookie{Name: "sessionid", Value: c.sessionCookie})
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to access add page: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Check if we got redirected to login (session expired)
-	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
-		location := resp.Header.Get("Location")
-		if strings.Contains(location, "login") {
-			// Session expired, try to login again
-			c.isLoggedIn = false
-			if err := c.login(); err != nil {
-				return fmt.Errorf("re-login failed: %v", err)
-			}
-			// Retry the request
-			return c.archiveURL(urlStr, username)
-		}
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read add page: %v", err)
-	}
-
-	// Extract CSRF token from the add form
-	csrfRegex := regexp.MustCompile(`name="csrfmiddlewaretoken" value="([^"]+)"`)
-	csrfMatches := csrfRegex.FindStringSubmatch(string(body))
-	if len(csrfMatches) < 2 {
-		return fmt.Errorf("failed to extract CSRF token from add page")
-	}
-	c.csrfToken = csrfMatches[1]
-
-	// Step 2: Submit the URL addition form
-	addData := url.Values{}
-	addData.Set("url", urlStr)
-	addData.Set("parser", "url_list")
-	addData.Set("depth", "0")
-
-	// Combine base tag with username tag if provided
-	tag := c.config.ArchiveBox.Tag
-	if username != "" {
-		tag = fmt.Sprintf("%s,fediarchive-%s", tag, username)
-	}
-	addData.Set("tag", tag)
-	log.Printf("Archiving URL with tags: %s", tag)
-	addData.Set("force", "true")
-	addData.Set("csrfmiddlewaretoken", c.csrfToken)
-
-	addReq, err := http.NewRequest("POST", addURL, strings.NewReader(addData.Encode()))
-	if err != nil {
-		return fmt.Errorf("failed to create add request: %v", err)
-	}
-
-	addReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	addReq.Header.Set("Referer", addURL)
-
-	// Add session cookie
-	if c.sessionCookie != "" {
-		addReq.AddCookie(&http.Cookie{Name: "sessionid", Value: c.sessionCookie})
-	}
-
-	// Add CSRF cookie if available
-	if c.csrfToken != "" { // Changed from c.csrfCookie to c.csrfToken
-		addReq.AddCookie(&http.Cookie{Name: "csrftoken", Value: c.csrfToken})
-	}
-
-	addResp, err := c.httpClient.Do(addReq)
-	if err != nil {
-		return fmt.Errorf("failed to submit add request: %v", err)
-	}
-	defer addResp.Body.Close()
-
-	// Check if we got redirected to login (session expired)
-	if addResp.StatusCode == http.StatusFound || addResp.StatusCode == http.StatusMovedPermanently {
-		location := addResp.Header.Get("Location")
-		if strings.Contains(location, "login") {
-			// Session expired, try to login again
-			c.isLoggedIn = false
-			if err := c.login(); err != nil {
-				return fmt.Errorf("re-login failed: %v", err)
-			}
-			// Retry the request
-			return c.archiveURL(urlStr, username)
-		}
-	}
-
-	// Success - URL was added to the queue
-	if addResp.StatusCode == http.StatusOK || addResp.StatusCode == http.StatusFound {
-		log.Printf("Successfully queued URL for archiving: %s", urlStr)
-		return nil
-	}
-
-	// Read response body for error details
-	responseBody, _ := io.ReadAll(addResp.Body)
-	log.Printf("Failed to archive URL %s - status: %d, response: %s", urlStr, addResp.StatusCode, string(responseBody))
-	return fmt.Errorf("failed to archive URL %s - status: %d", urlStr, addResp.StatusCode)
-}
-
-func (c *ArchiveBoxClient) testConnection() error {
-	// Test ArchiveBox connection by trying to access the main page
-	req, err := http.NewRequest("GET", c.config.ArchiveBox.URL+"/", nil)
-	if err != nil {
-		return fmt.Errorf("failed to create test request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to connect to ArchiveBox: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Accept 200 as successful response (ArchiveBox is accessible)
-	if resp.StatusCode == http.StatusOK {
-		log.Printf("ArchiveBox connection successful (status: %d)", resp.StatusCode)
-		return nil
-	}
-
-	return fmt.Errorf("ArchiveBox connection failed - status: %d", resp.StatusCode)
 }
 
 func discoverRSSFeed(pageURL string) (string, error) {
@@ -1742,7 +1329,10 @@ func main() {
 
 	// Initialize clients
 	fediverseClient := NewFediverseClient(config)
-	archiveClient := NewArchiveBoxClient(config)
+	s3Client, err := NewS3Client(config)
+	if err != nil {
+		log.Fatalf("Failed to create S3 client: %v", err)
+	}
 
 	// Extract instance hostname for internal link filtering
 	instanceURL, err := url.Parse(config.Fediverse.InstanceURL)
@@ -1759,33 +1349,6 @@ func main() {
 	}
 
 	for {
-		// Test ArchiveBox connection and authentication
-		if err := archiveClient.testConnection(); err != nil {
-			log.Printf("ArchiveBox connection test failed: %v", err)
-			log.Println("Please check your ArchiveBox configuration and ensure the service is running")
-			if !*singleRun {
-				log.Println("Waiting 1 hour before retry...")
-				time.Sleep(1 * time.Hour)
-				continue
-			} else {
-				break
-			}
-		}
-		log.Println("ArchiveBox connection test successful")
-
-		// Authenticate with ArchiveBox
-		if err := archiveClient.login(); err != nil {
-			log.Printf("ArchiveBox authentication failed: %v", err)
-			log.Println("Please check your ArchiveBox credentials in config.json")
-			if !*singleRun {
-				log.Println("Waiting 1 hour before retry...")
-				time.Sleep(1 * time.Hour)
-				continue
-			} else {
-				break
-			}
-		}
-		log.Println("ArchiveBox authentication successful")
 		// Authenticate with Fediverse instance
 		if err := fediverseClient.authenticate(); err != nil {
 			log.Printf("Authentication failed: %v", err)
@@ -1841,6 +1404,17 @@ func main() {
 			}
 		}
 
+		// Get authenticated account for filename
+		currentAccount, err := fediverseClient.getCurrentAccount()
+		if err != nil {
+			log.Printf("Failed to get current account: %v", err)
+			currentAccount = &Account{Username: "unknown", Acct: "unknown"}
+		}
+		homeTimelineAccountName := currentAccount.Acct
+		if homeTimelineAccountName == "" {
+			homeTimelineAccountName = currentAccount.Username
+		}
+
 		// Get home timeline and extract URLs
 		statuses, err := fediverseClient.getHomeTimeline()
 		if err != nil {
@@ -1887,14 +1461,16 @@ func main() {
 
 		log.Printf("Found %d unique URLs to archive from home timeline", len(urlsToArchive))
 
-		// Archive URLs from home timeline
-		for url := range urlsToArchive {
-			log.Printf("Archiving URL from home timeline: %s", url)
-			if err := archiveClient.archiveURL(url, ""); err != nil {
-				log.Printf("Failed to archive URL %s: %v", url, err)
+		// Upload home timeline URLs separately
+		if len(urlsToArchive) > 0 {
+			homeTimelineURLList := make([]string, 0, len(urlsToArchive))
+			for url := range urlsToArchive {
+				homeTimelineURLList = append(homeTimelineURLList, url)
 			}
-			// Add a small delay to avoid overwhelming the ArchiveBox instance
-			time.Sleep(500 * time.Millisecond)
+			log.Printf("Uploading %d unique URLs from home timeline to S3...", len(homeTimelineURLList))
+			if err := s3Client.uploadURLs(homeTimelineURLList, homeTimelineAccountName); err != nil {
+				log.Printf("Failed to upload home timeline URLs to S3: %v", err)
+			}
 		}
 
 		// Process older posts from followed users
@@ -1956,22 +1532,41 @@ func main() {
 
 			log.Printf("Found %d unique URLs to archive from user %s", len(userURLsToArchive), follower.Username)
 
-			// Archive URLs from user's posts
-			for url := range userURLsToArchive {
-				log.Printf("Archiving URL from user %s: %s", follower.Username, url)
-				if err := archiveClient.archiveURL(url, follower.Username); err != nil {
-					log.Printf("Failed to archive URL %s: %v", url, err)
+			// Upload user URLs separately with account name in filename
+			if len(userURLsToArchive) > 0 {
+				userURLList := make([]string, 0, len(userURLsToArchive))
+				for url := range userURLsToArchive {
+					userURLList = append(userURLList, url)
 				}
-				// Add a small delay to avoid overwhelming the ArchiveBox instance
-				time.Sleep(500 * time.Millisecond)
+				accountName := follower.Acct
+				if accountName == "" {
+					accountName = follower.Username
+				}
+				log.Printf("Uploading %d unique URLs from user %s to S3...", len(userURLList), accountName)
+				if err := s3Client.uploadURLs(userURLList, accountName); err != nil {
+					log.Printf("Failed to upload URLs for user %s to S3: %v", accountName, err)
+				}
 			}
 
 			// Add delay between users to avoid rate limiting
 			time.Sleep(2 * time.Second)
 		}
 
-		// Process RSS feeds
-		processRSSFeeds(config, archiveClient)
+		// Process RSS feeds (upload separately with feed identifier)
+		rssURLsToArchive := make(map[string]bool)
+		processRSSFeeds(config, rssURLsToArchive)
+
+		// Upload RSS feed URLs separately
+		if len(rssURLsToArchive) > 0 {
+			rssURLList := make([]string, 0, len(rssURLsToArchive))
+			for url := range rssURLsToArchive {
+				rssURLList = append(rssURLList, url)
+			}
+			log.Printf("Uploading %d unique URLs from RSS feeds to S3...", len(rssURLList))
+			if err := s3Client.uploadURLs(rssURLList, "rss-feeds"); err != nil {
+				log.Printf("Failed to upload RSS feed URLs to S3: %v", err)
+			}
+		}
 
 		log.Println("Archive process completed")
 

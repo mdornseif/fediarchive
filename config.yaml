@@ -4,11 +4,12 @@ fediverse:
     password: iPaiketig0yaisho
     token: ZDK4MDBHOTKTMMVKNY0ZYTVLLWEZYTKTNDI5MGFJYTBLODUW
     token_exp: ""
-archivebox:
-    url: https://archive.23.nu
-    username: fediarchive
-    password: iPaiketig0yaisho
-    tag: fediarchive
+s3:
+    endpoint: s3.dornseif.cloud
+    access_key: GK9bcded255d5caee54fe65f78
+    secret_key: fa22e0f886d0186c5cff209485109429e3c039042bd513a248b905b2c8b494fd
+    bucket: archivebox-in
+    use_ssl: true
 settings:
     max_posts_per_user: 5000
     include_visibility:
